@@ -42,6 +42,10 @@ def main(argv=None):
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     parser.add_argument('--model', type=Path)
     parser.add_argument('--hdri', type=Path)
+    parser.add_argument('--scene', type=Path, help='Complete .blend environment; retains world and lights')
+    parser.add_argument('--environment', choices=['studio', 'courtyard'], default='studio')
+    parser.add_argument('--subject-position', type=float, nargs=3, default=[0, 0, 0], metavar=('X', 'Y', 'Z'))
+    parser.add_argument('--subject-heading', type=float, default=0)
     parser.add_argument('--model-id', default='horse_statue_01')
     parser.add_argument('--hdri-id', default='abandoned_factory_canteen_01')
     parser.add_argument('--output', type=Path)
@@ -70,9 +74,13 @@ def main(argv=None):
     if min(args.radius, args.subject_size, args.focal_mm) <= 0 or not -89 < args.elevation < 89:
         parser.error('positive radius/size/focal length and elevation between -89 and 89 required')
     root = args.root.resolve()
+    scene_file = args.scene.resolve() if args.scene else None
+    if scene_file and (not scene_file.is_file() or scene_file.suffix.lower() != '.blend'):
+        parser.error('--scene must point to an existing .blend file')
     model = args.model.resolve() if args.model else asset_file(root, 'models', args.model_id, {'.blend', '.glb', '.gltf', '.fbx', '.obj'})
-    hdri = args.hdri.resolve() if args.hdri else asset_file(root, 'hdris', args.hdri_id, {'.hdr', '.exr'})
-    for path in (model, hdri):
+    hdri = args.hdri.resolve() if args.hdri else (None if scene_file else asset_file(root, 'hdris', args.hdri_id, {'.hdr', '.exr'}))
+    for path in (model, hdri, scene_file):
+        if path is None: continue
         if not path.is_file():
             parser.error(f'File missing: {path}')
     blender = shutil.which(args.blender)
@@ -82,7 +90,8 @@ def main(argv=None):
     if not args.no_video and not ffmpeg:
         parser.error('ffmpeg not found; install ffmpeg or use --no-video')
     output = (args.output or root / 'renders' / 'horse_orbit_demo').resolve()
-    for source in (model, hdri):
+    for source in (model, hdri, scene_file):
+        if source is None: continue
         if output == source.parent or output in source.parents:
             parser.error('Output must not contain source asset files')
     if output.exists() and any(output.iterdir()):
@@ -95,7 +104,7 @@ def main(argv=None):
             elif target.exists(): target.unlink()
     output.mkdir(parents=True, exist_ok=True)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
-    config.update(model=str(model), hdri=str(hdri), output=str(output))
+    config.update(model=str(model), hdri=str(hdri) if hdri else None, scene=str(scene_file) if scene_file else None, output=str(output))
     config_path = output / 'render-config.json'
     config_path.write_text(json.dumps(config, indent=2))
     script = Path(__file__).with_name('blender_orbit.py')

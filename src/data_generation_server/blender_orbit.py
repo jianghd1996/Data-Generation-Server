@@ -13,6 +13,55 @@ def save_json(path, value):
     path.write_text(json.dumps(value, indent=2))
 
 
+
+def surface(name, color):
+    material = bpy.data.materials.new(name)
+    material.use_nodes = True
+    bsdf = material.node_tree.nodes.get('Principled BSDF')
+    bsdf.inputs['Base Color'].default_value = (*color, 1)
+    bsdf.inputs['Roughness'].default_value = 0.8
+    return material
+
+
+def cube(name, location, dimensions, material):
+    bpy.ops.mesh.primitive_cube_add(size=1, location=location)
+    obj = bpy.context.object
+    obj.name = name
+    obj.dimensions = dimensions
+    bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+    obj.data.materials.append(material)
+    bevel = obj.modifiers.new('Soft edges', 'BEVEL')
+    bevel.width = 0.03
+    bevel.segments = 2
+    return obj
+
+
+def make_courtyard(origin):
+    """Small deterministic geometric environment; no extra asset download required."""
+    stone = surface('CourtyardStone', (0.44, 0.40, 0.34))
+    plaster = surface('CourtyardPlaster', (0.68, 0.61, 0.49))
+    dark = surface('CourtyardTrim', (0.14, 0.18, 0.18))
+    cube('CourtyardBase', origin + Vector((0, 0, -0.14)), (28, 28, 0.25), stone)
+    tiles = [surface(f'Paving{i}', (0.27 + i * 0.025, 0.29 + i * 0.025, 0.27 + i * 0.025)) for i in range(5)]
+    for x in range(-10, 11):
+        for y in range(-10, 11):
+            cube(f'Paver_{x}_{y}', origin + Vector((x, y, -0.035)), (0.98, 0.98, 0.05), tiles[(x * 7 + y * 3) % 5])
+    for y in (-11, 11):
+        cube('CourtyardWall', origin + Vector((0, y, 2)), (23, 0.3, 4), plaster)
+        cube('WallCap', origin + Vector((0, y, 4.05)), (23.2, 0.45, 0.15), stone)
+        for x in (-9, -6, -3, 0, 3, 6, 9):
+            cube('WallPillar', origin + Vector((x, y - (0.22 if y > 0 else -0.22), 2)), (0.4, 0.6, 4.1), stone)
+            cube('WallPanel', origin + Vector((x + 1.1, y - (0.18 if y > 0 else -0.18), 2)), (1.3, 0.08, 1.8), dark)
+    for x in (-11, 11):
+        cube('SideWall', origin + Vector((x, 0, 1.2)), (0.3, 22, 2.4), plaster)
+    for x, y in [(-8, -7), (8, -7), (-8, 7), (8, 7)]:
+        cube('Planter', origin + Vector((x, y, 0.4)), (1.4, 1.4, 0.8), stone)
+        for i in range(5):
+            bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=0.65, location=origin + Vector((x + 0.3 * math.cos(i * 2), y + 0.3 * math.sin(i * 2), 1 + i * 0.18)))
+            bpy.context.object.name = 'GeometricShrub'
+            bpy.context.object.data.materials.append(surface(f'Leaf_{x}_{y}_{i}', (0.08 + i * 0.015, 0.18 + i * 0.015, 0.055)))
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=Path, required=True)
@@ -24,8 +73,16 @@ def main():
     for folder in ('rgb', 'mask', 'depth'):
         (output / folder).mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    bpy.ops.object.select_all(action='SELECT')
-    bpy.ops.object.delete(use_global=False)
+    if cfg.get('scene'):
+        bpy.ops.wm.open_mainfile(filepath=cfg['scene'])
+    else:
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete(use_global=False)
+    environment_objects = list(bpy.context.scene.objects)
+    for obj in environment_objects:
+        obj.animation_data_clear()
+        obj.pass_index = 0
+    bpy.context.scene.frame_set(1)
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     scene.cycles.samples = cfg['samples']
@@ -115,32 +172,43 @@ def main():
             obj.parent = normalizer
             obj.matrix_world = world
     normalizer.scale = (scale,) * 3
-    normalizer.location = -center * scale
+    heading = math.radians(cfg.get('subject_heading', 0))
+    rotation = Matrix.Rotation(heading, 3, 'Z')
+    normalizer.rotation_euler.z = heading
+    placement = Vector(cfg.get('subject_position', [0, 0, 0]))
+    normalizer.location = placement - rotation @ (center * scale)
     for obj in geometry: obj.pass_index = 1
     bpy.context.view_layer.update()
-    target = Vector((0, 0, size.z * scale / 2))
+    target = placement + Vector((0, 0, size.z * scale / 2))
 
-    bpy.ops.mesh.primitive_plane_add(size=200, location=(0, 0, -0.005))
-    ground = bpy.context.object
-    ground.name = 'Ground'
-    material = bpy.data.materials.new('GroundMaterial')
-    material.use_nodes = True
-    bsdf = material.node_tree.nodes.get('Principled BSDF')
-    bsdf.inputs['Base Color'].default_value = (0.18, 0.18, 0.18, 1)
-    bsdf.inputs['Roughness'].default_value = 0.85
-    ground.data.materials.append(material)
-    world = bpy.data.worlds.new('HDRIWorld')
-    scene.world = world
-    world.use_nodes = True
-    nodes = world.node_tree.nodes
-    nodes.clear()
-    env = nodes.new('ShaderNodeTexEnvironment')
-    env.image = bpy.data.images.load(cfg['hdri'], check_existing=True)
-    background = nodes.new('ShaderNodeBackground')
-    background.inputs['Strength'].default_value = cfg['hdri_strength']
-    world_output = nodes.new('ShaderNodeOutputWorld')
-    world.node_tree.links.new(env.outputs['Color'], background.inputs['Color'])
-    world.node_tree.links.new(background.outputs['Background'], world_output.inputs['Surface'])
+    if not cfg.get('scene'):
+        if cfg.get('environment') == 'courtyard':
+            make_courtyard(placement)
+        else:
+            bpy.ops.mesh.primitive_plane_add(size=200, location=placement + Vector((0, 0, -0.005)))
+            ground = bpy.context.object
+            ground.name = 'Ground'
+            ground.data.materials.append(surface('GroundMaterial', (0.18, 0.18, 0.18)))
+    if cfg.get('hdri'):
+        world = bpy.data.worlds.new('HDRIWorld')
+        scene.world = world
+        world.use_nodes = True
+        nodes = world.node_tree.nodes
+        nodes.clear()
+        env = nodes.new('ShaderNodeTexEnvironment')
+        env.image = bpy.data.images.load(cfg['hdri'], check_existing=True)
+        background = nodes.new('ShaderNodeBackground')
+        background.inputs['Strength'].default_value = cfg['hdri_strength']
+        world_output = nodes.new('ShaderNodeOutputWorld')
+        world.node_tree.links.new(env.outputs['Color'], background.inputs['Color'])
+        world.node_tree.links.new(background.outputs['Background'], world_output.inputs['Surface'])
+    # Validate external scene textures too, after open_mainfile resolved its relative paths.
+    scene_missing = [image.filepath for image in bpy.data.images
+                     if image.source == 'FILE' and not image.packed_file
+                     and not Path(bpy.path.abspath(image.filepath)).is_file()]
+    if scene_missing:
+        save_json(output / 'render-report.json', {'ok': False, 'missing_textures': scene_missing})
+        raise RuntimeError(f'Missing scene textures: {scene_missing}')
 
     bpy.ops.object.camera_add()
     camera = bpy.context.object
@@ -151,6 +219,7 @@ def main():
     camera.data.clip_start = 0.01
     camera.data.clip_end = 1000
     camera.data.dof.use_dof = False
+    scene.render.use_sequencer = False
     layer = bpy.context.view_layer
     layer.use_pass_object_index = True
     layer.use_pass_z = True
@@ -197,10 +266,12 @@ def main():
         bpy.ops.render.render(write_still=True)
     save_json(output / 'cameras.json', cameras)
     bpy.ops.wm.save_as_mainfile(filepath=str(output / 'scene.blend'))
-    (output / 'prompt.txt').write_text('A static subject on a flat ground plane. The camera smoothly orbits around the subject.\n')
+    environment_label = 'a 3D environment' if cfg.get('scene') or cfg.get('environment') == 'courtyard' else 'a flat ground plane'
+    (output / 'prompt.txt').write_text(f'A static subject in {environment_label}. The camera smoothly orbits around the subject.\n')
     save_json(output / 'render-report.json', {'ok': True, 'devices': devices, 'blender': bpy.app.version_string,
         'frames': cfg['frames'], 'elapsed_seconds': time.monotonic() - started, 'missing_textures': [],
-        'source_model': cfg['model'], 'source_hdri': cfg['hdri'], 'normalization_scale': scale,
+        'source_model': cfg['model'], 'source_hdri': cfg['hdri'], 'source_scene': cfg.get('scene'),
+        'environment': cfg.get('environment'), 'subject_position': list(placement), 'subject_heading': cfg.get('subject_heading', 0), 'normalization_scale': scale,
         'source_bounds': [list(lower), list(upper)], 'geometry_objects': [obj.name for obj in geometry]})
 
 

@@ -211,3 +211,46 @@ Blender 没在 PATH 中时加 `--blender /完整路径/blender`。
 输出目录非空时拒绝覆盖；改目录或使用 --overwrite（删除管线已知输出文件，不删除其他文件）。
 启动脚本先检查素材、Blender、ffmpeg，再调用 Blender。Blender 错误会传回非零退出码。
 这里尚未在真实 Blender/GPU 上试渲染，需用 3 帧 smoke 命令验证版本与画面。
+
+## 完整三维环境
+
+### 无需下载的测试庭院
+
+`--environment courtyard` 创建有真实几何的铺地、四周围墙、立柱、墙面装饰和花坛。
+它是用于打通场景管线的简单程序化环境，不是高质量扫描场景；HDRI 仍提供天空和照明。
+庭院场景不添加原来 200×200 的纯色地面，近处与中远处的几何有正确视差。
+
+```bash
+HDRI_ID=$(python -c "import json; print(json.load(open('configs/hdri.smoke.json'))['assets'][0]['id'])")
+CUDA_VISIBLE_DEVICES=3 dgs-render \
+  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
+  --model-id chinese_cabinet --hdri-id "$HDRI_ID" \
+  --environment courtyard \
+  --frames 3 --width 640 --height 360 --samples 16 --no-video \
+  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_courtyard_smoke
+```
+
+### 外部场景
+
+```bash
+CUDA_VISIBLE_DEVICES=3 dgs-render \
+  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
+  --model-id chinese_cabinet \
+  --scene /absolute/path/environment.blend \
+  --subject-position 0 0 0 --subject-heading 0 \
+  --radius 4.5 --frames 3 --width 640 --height 360 --samples 16 --no-video \
+  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_scene_smoke
+```
+
+`--scene` 加载 .blend 当前活动场景，保留环境几何、材质、灯光和 world；不添加地面。
+该模式无需额外 HDRI，`--hdri-id` 不生效；如需替换 world，显式传 `--hdri /absolute/path/light.hdr`。
+原场景的相机、合成器、分辨率和色彩管理被渲染管线替换，原文件不写入，只保存输出目录的 scene.blend。
+场景纹理必须随原场景保存正确相对路径或打包在 .blend 中；不要只下载 blend 而漏掉贴图依赖。
+场景模型需适配 Blender 4.2–4.5，特殊插件、Geometry Nodes 外部依赖和模拟缓存须事先准备。
+
+`--subject-position X Y Z` 指定主体底部中心的世界坐标；`--subject-heading` 指定绕 Z 轴旋转角度。
+`--subject-size` 是主体最长边的目标长度，场景本身不缩放；场景应采用合理单位。
+相机轨迹的中心跟随主体，不再绑定世界原点。程序化庭院也跟随位置整体平移。
+仅支持静态场景：对象动画被冻结，但物理模拟、材质/节点动画和特殊驱动应先在 Blender 中烘焙或移除。
+不会自动寻找空地、吸附复杂地形、检测碰撞或避让墙壁。请设置位置、半径，并先做 3 帧测试。
+主角可能被环境遮挡；主体 mask 仅包含实际可见部分。原环境对象索引清零，确保不混入主体 mask。

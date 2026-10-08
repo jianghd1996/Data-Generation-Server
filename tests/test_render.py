@@ -30,6 +30,20 @@ class RenderTests(unittest.TestCase):
             (asset / 'asset.json').write_text(json.dumps({'files': [{'path': '../bad.blend'}]}))
             with self.assertRaises(ValueError): asset_file(root, 'models', 'test', {'.blend'})
 
+    def test_scene_does_not_require_hdri(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            model, scene = root / 'model.blend', root / 'environment.blend'
+            model.touch(); scene.touch()
+            output = root / 'out'
+            args = ['--model', str(model), '--scene', str(scene), '--output', str(output), '--frames', '3', '--no-video', '--subject-position', '2', '3', '4']
+            with patch('data_generation_server.render.shutil.which', return_value='/bin/blender'), patch('data_generation_server.render.subprocess.run'):
+                with self.assertRaises(RuntimeError): main(args)
+            config = json.loads((output / 'render-config.json').read_text())
+            self.assertIsNone(config['hdri'])
+            self.assertEqual(config['scene'], str(scene))
+            self.assertEqual(config['subject_position'], [2, 3, 4])
+
     def test_launcher_checks_outputs_before_success(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
