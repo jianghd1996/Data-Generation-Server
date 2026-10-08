@@ -106,3 +106,18 @@ Powered by Poly Haven — https://polyhaven.com/
 API 条款：https://github.com/Poly-Haven/Public-API/blob/master/ToS.md
 请求使用项目专属 User-Agent。Poly Haven 资产为 CC0；其他素材许可由清单提供并随资产保存。
 下载代码不自动判断训练或再分发权限。素材不提交到 Git 仓库。
+
+## SSL 证书错误
+
+如果出现 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`，
+可能是代理使用自签 CA，或 Python 环境的 CA 集合缺失。
+从服务器/代理管理员取得可信的 PEM CA bundle，传入 `--ca-bundle /path/to/ca.pem`；
+也可设置 `DGS_CA_BUNDLE` 或 `SSL_CERT_FILE`。所有子命令及文件下载均使用该配置。
+
+```bash
+dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/dataset/orbit/assets --ca-bundle /path/to/ca.pem
+```
+
+临时排查可在同一命令末尾加 `--insecure`，仅对本次进程关闭 HTTPS 证书校验。
+该模式无法验证服务端身份，建议有正确 CA 后移除；默认仍开启校验。
+不支持同时指定 CA bundle 与 `--insecure`。

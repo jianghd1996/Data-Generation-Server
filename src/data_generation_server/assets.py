@@ -3,6 +3,8 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
+import ssl
 from pathlib import Path
 import re
 import time
@@ -10,13 +12,15 @@ from urllib.parse import urlencode, urlparse, unquote
 from urllib.request import Request, urlopen
 
 API = 'https://api.polyhaven.com'
+TLS_CONTEXT = None
+
 UA = 'Data-Generation-Server/0.1 (https://github.com/jianghd1996/Data-Generation-Server)'
 
 
 def request(url, headers=None):
     if urlparse(url).scheme not in ('http', 'https'):
         raise ValueError('Only HTTP(S) download URLs are supported')
-    return urlopen(Request(url, headers={'User-Agent': UA, 'Accept-Encoding': 'identity', **(headers or {})}), timeout=60)
+    return urlopen(Request(url, headers={'User-Agent': UA, 'Accept-Encoding': 'identity', **(headers or {})}), timeout=60, context=TLS_CONTEXT)
 
 
 def api(path):
@@ -188,7 +192,17 @@ def main(argv=None):
     fetch.add_argument('--root', type=Path, default=Path('data/assets'))
     fetch.add_argument('--workers', type=int, default=2)
     fetch.add_argument('--dry-run', action='store_true')
+    for command_parser in (search, inspect, fetch):
+        command_parser.add_argument('--ca-bundle', type=Path, help='PEM CA bundle; defaults to DGS_CA_BUNDLE or SSL_CERT_FILE')
+        command_parser.add_argument('--insecure', action='store_true', help='Disable TLS verification for this invocation')
     args = parser.parse_args(argv)
+    global TLS_CONTEXT
+    ca_bundle = args.ca_bundle or os.environ.get('DGS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')
+    if args.insecure and ca_bundle:
+        parser.error('--insecure cannot be combined with a CA bundle')
+    TLS_CONTEXT = ssl._create_unverified_context() if args.insecure else ssl.create_default_context(cafile=str(ca_bundle) if ca_bundle else None)
+    if args.insecure:
+        print('WARNING: TLS certificate verification is disabled for this invocation.')
     if args.command == 'files':
         print(json.dumps(api('/files/' + args.id), indent=2)); return 0
     if args.command == 'search':
@@ -215,8 +229,11 @@ def main(argv=None):
                 results.append(job.result())
                 print(f"OK {asset['id']}")
             except Exception as exc:
-                errors.append({'asset': asset, 'error': str(exc)})
-                print(f"FAILED {asset['id']}: {exc}")
+                message = str(exc)
+                if 'CERTIFICATE_VERIFY_FAILED' in message:
+                    message += '; Supply your server/proxy CA with --ca-bundle /path/to/ca.pem (or DGS_CA_BUNDLE). Temporary diagnostic fallback: --insecure.'
+                errors.append({'asset': asset, 'error': message})
+                print(f"FAILED {asset['id']}: {message}")
     report = {'version': 1, 'dry_run': args.dry_run, 'results': sorted(results, key=lambda x: x['asset']['id']), 'errors': errors}
     if args.dry_run:
         print(json.dumps(report, ensure_ascii=False, indent=2))

@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from data_generation_server.assets import acquire, download, safe_path, validate_assets
+from data_generation_server.assets import acquire, download, safe_path, validate_assets, main
 
 
 class Response:
@@ -19,6 +19,20 @@ class Response:
 
 
 class Tests(unittest.TestCase):
+    def test_tls_options(self):
+        import ssl
+        import data_generation_server.assets as module
+        with patch.dict('os.environ', {}, clear=True), patch.object(module, 'api', return_value={}):
+            main(['files', 'test'])
+            self.assertEqual(module.TLS_CONTEXT.verify_mode, ssl.CERT_REQUIRED)
+            main(['files', 'test', '--insecure'])
+            self.assertEqual(module.TLS_CONTEXT.verify_mode, ssl.CERT_NONE)
+        context = ssl.create_default_context()
+        with patch.dict('os.environ', {}, clear=True), patch.object(module, 'api', return_value={}), patch.object(module.ssl, 'create_default_context', return_value=context) as factory:
+            main(['files', 'test', '--ca-bundle', '/custom/ca.pem'])
+            factory.assert_called_once_with(cafile='/custom/ca.pem')
+        module.TLS_CONTEXT = None
+
     def test_resume(self):
         with tempfile.TemporaryDirectory() as directory:
             target = Path(directory) / 'mesh.glb'
