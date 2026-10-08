@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 import random
 import time
+import sys
+import threading
 from urllib.parse import urlencode, urlparse, unquote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -16,6 +18,19 @@ from urllib.error import HTTPError
 API = 'https://api.polyhaven.com'
 TLS_CONTEXT = None
 DEFAULT_ROOT = Path('/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset')
+
+PROGRESS_LOCK = threading.Lock()
+
+
+def show_progress(target, done, total, started, transferred):
+    elapsed = max(time.monotonic() - started, 0.001)
+    percent = f'{done / total * 100:5.1f}%' if total else '  ? %'
+    filled = min(20, int(done / total * 20)) if total else 0
+    bar = '█' * filled + '░' * (20 - filled)
+    size = f'{done / 1048576:.1f}' + (f'/{total / 1048576:.1f}' if total else '') + ' MiB'
+    with PROGRESS_LOCK:
+        print(f'[download] {target.name}: {bar} {percent} | {size} | {transferred / elapsed / 1048576:.2f} MiB/s', file=sys.stderr, flush=True)
+
 
 UA = 'Data-Generation-Server/0.1 (https://github.com/jianghd1996/Data-Generation-Server)'
 
@@ -80,6 +95,8 @@ def download(spec, target):
     if receipt.exists() and target.exists():
         old = json.loads(receipt.read_text())
         if old.get('url') == spec['url'] and verify(target, spec) and digest(target, 'sha256') == old.get('sha256'):
+            with PROGRESS_LOCK:
+                print(f'[skip] {target.name}: already verified', file=sys.stderr, flush=True)
             return old
     partial = target.with_name(target.name + '.part')
     state = target.with_name(target.name + '.part.json')
@@ -98,9 +115,21 @@ def download(spec, target):
                 else:
                     expected = int(response.headers['Content-Length']) if response.headers.get('Content-Length') else None
                 write_json(state, {'url': spec['url'], 'validator': response.headers.get('ETag') or response.headers.get('Last-Modified')})
+                total = spec.get('size') or expected
+                done = offset if resumed else 0
+                transferred = 0
+                started = time.monotonic()
+                last_update = started
+                show_progress(target, done, total, started, transferred)
                 with partial.open('ab' if resumed else 'wb') as out:
                     while block := response.read(1024 * 1024):
                         out.write(block)
+                        done += len(block)
+                        transferred += len(block)
+                        if time.monotonic() - last_update >= 1:
+                            show_progress(target, done, total, started, transferred)
+                            last_update = time.monotonic()
+                show_progress(target, done, total, started, transferred)
             if expected is not None and partial.stat().st_size != expected:
                 raise ValueError('Incomplete response')
             if not verify(partial, spec):
