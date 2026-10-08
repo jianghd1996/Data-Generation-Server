@@ -105,6 +105,8 @@ def download(spec, target):
             previous = json.loads(state.read_text()) if state.exists() else {}
             offset = partial.stat().st_size if partial.exists() and previous.get('url') == spec['url'] and previous.get('validator') else 0
             headers = {'Range': f'bytes={offset}-', 'If-Range': previous['validator']} if offset else {}
+            with PROGRESS_LOCK:
+                print(f'[connect] {target.name}: waiting for response (timeout 60s, attempt {attempt + 1}/4)', file=sys.stderr, flush=True)
             with request(spec['url'], headers) as response:
                 resumed = offset and response.status == 206
                 if response.status == 206:
@@ -122,7 +124,7 @@ def download(spec, target):
                 last_update = started
                 show_progress(target, done, total, started, transferred)
                 with partial.open('ab' if resumed else 'wb') as out:
-                    while block := response.read(1024 * 1024):
+                    while block := (getattr(response, 'read1', response.read))(64 * 1024):
                         out.write(block)
                         done += len(block)
                         transferred += len(block)
@@ -142,6 +144,8 @@ def download(spec, target):
             write_json(receipt, result)
             return result
         except Exception as exc:
+            with PROGRESS_LOCK:
+                print(f'[retry] {target.name}: attempt {attempt + 1}/4 failed: {exc}', file=sys.stderr, flush=True)
             if attempt == 3:
                 raise
             if isinstance(exc, HTTPError) and exc.code == 416:
