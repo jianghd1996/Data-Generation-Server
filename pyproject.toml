@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "data-generation-server"
+version = "0.1.0"
+description = "Server-side asset acquisition and camera-orbit dataset pipeline"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+dgs-assets = "data_generation_server.assets:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

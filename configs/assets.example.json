@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "assets": [
+    {"provider": "polyhaven", "id": "horse_statue_01", "kind": "models", "resolution": "2k", "format": "blend"},
+    {"provider": "polyhaven", "id": "abandoned_factory_canteen_01", "kind": "hdris", "resolution": "2k", "format": "hdr"}
+  ]
+}
