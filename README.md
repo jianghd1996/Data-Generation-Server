@@ -1,7 +1,7 @@
 # Data Generation Server
 
 用于服务器端的「素材下载 → 场景组合 → 相机轨迹 → 渲染 → 数据集」管线。
-当前实现第一阶段：素材检索、清单下载、校验与来源记录。渲染阶段尚未实现。
+当前实现素材下载与校验，以及单主体的相机环绕渲染。完整三维场景组合和批量渲染尚未实现。
 
 ## 安装与开始
 
@@ -158,3 +158,56 @@ dgs-assets verify
 下载时每个文件开始、结束以及传输期间约每秒输出一行进度：文件名、百分比、MiB 和 MiB/s。
 并发下载的进度按文件名区分；服务器日志中保留每行，不需要交互终端。大小未知时显示 `? %`。
 已验证的文件显示 `[skip]`。进度写到 stderr；最后的 100% 仅代表传输结束，随后仍需校验。
+
+## 单样例环绕渲染
+
+依赖：Linux Blender **4.2–4.5**（推荐官方下载的 4.5 LTS 二进制）与 ffmpeg。
+Blender 是独立程序，不要在普通 Python 环境 pip install bpy 来替代此启动流程。
+Blender 5 的合成器 API 暂未支持。下载阶段的 Python 环境不必装 torch。
+
+```bash
+# 更新后重新安装，注册新增的 dgs-render 命令
+python -m pip install -e .
+blender --version
+ffmpeg -version
+
+# 先渲染 3 帧、640×360，检查加载、贴图、GPU 与输出
+CUDA_VISIBLE_DEVICES=4 dgs-render --frames 3 --width 640 --height 360 --samples 16 \
+  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/horse_smoke
+
+# 通过后再做 81 帧、720P、90° 环绕
+CUDA_VISIBLE_DEVICES=4 dgs-render --frames 81 --samples 32 --sweep 90 \
+  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/horse_orbit_90
+```
+
+默认从 root 下的 `horse_statue_01` 与 `abandoned_factory_canteen_01` 的 asset.json 找到主文件。
+旧下载位于其他目录时用 `--root /实际素材根目录`；输出仍可独立通过 --output 指定。
+Blender 没在 PATH 中时加 `--blender /完整路径/blender`。
+默认 CUDA，可显式选 `--device OPTIX` 或 `--device CPU`。没有可用 GPU 时明确失败，不静默切换 CPU。
+`CUDA_VISIBLE_DEVICES` 在启动前指定 GPU；不要与下载命令的 workers 混淆。
+不编码视频时用 `--no-video`，此时无需 ffmpeg，首帧保留为 rgb/rgb_0001.png。
+
+输出包含：
+
+- `video.mp4`：RGB 环绕视频；`image.jpg`：首帧。
+- `rgb/rgb_0001.png` 等：无损帧。
+- `mask/mask_0001.png` 等：白色主体、黑色背景，包含抗锯齿边界。
+- `depth/depth_0001.exr` 等：32 位 Blender Z pass；不是直接可视化的灰度图片。
+- `cameras.json`：K、每帧 OpenCV 坐标约定的 c2w/w2c、时间和文件名。
+- `scene.blend`、`render-config.json`、`render-report.json`、`prompt.txt`。
+- `SUCCESS.json`：渲染帧齐全且编码成功后生成。
+
+主体按包围盒最长边归一化到 2 个场景单位、底部贴地；物体与灯光保持静止，仅相机移动。
+相机保持目标中心，默认固定半径 4.5、仰角 12°、焦距 35mm、从 -90° 开始扫过 90°。
+可调 `--subject-size`、`--radius`、`--elevation`、`--start-angle`、`--sweep`、`--focal-mm`。
+360° 时首尾重复视角（非无缝循环编码策略）；实际构图需查看 smoke 图片后调节。
+深度单位是归一化后的场景单位，Z pass 为可见表面的相机距离，背景可能为很大数值。
+透视内参采用水平 sensor fit、方形像素；相机坐标 X 右/Y 下/Z 前，世界坐标 Z 上。
+场景为大地面 + HDRI，不是完整食堂环境；地面有三维视差，HDRI 只提供远景/光照。
+
+支持 .blend/.glb/.gltf/.fbx/.obj 单主体。blend 中所有几何作为一个主体加载，原相机/灯光关闭；
+不会自动从含多个场景物体的 blend 中识别主角。导入主体冻结动画，人物使用已摆好姿势的素材。
+贴图缺失时生成失败报告并停止；不生成粉色贴图视频。合成器一次渲染同时输出 RGB/mask/depth。
+输出目录非空时拒绝覆盖；改目录或使用 --overwrite（删除管线已知输出文件，不删除其他文件）。
+启动脚本先检查素材、Blender、ffmpeg，再调用 Blender。Blender 错误会传回非零退出码。
+这里尚未在真实 Blender/GPU 上试渲染，需用 3 帧 smoke 命令验证版本与画面。
