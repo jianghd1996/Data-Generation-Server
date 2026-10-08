@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from data_generation_server.assets import acquire, download, safe_path, validate_assets, main
+from data_generation_server.assets import acquire, download, safe_path, validate_assets, main, audit, build_manifest
 
 
 class Response:
@@ -32,6 +32,43 @@ class Tests(unittest.TestCase):
             main(['files', 'test', '--ca-bundle', '/custom/ca.pem'])
             factory.assert_called_once_with(cafile='/custom/ca.pem')
         module.TLS_CONTEXT = None
+
+    def test_batch_reproducible(self):
+        catalog = {str(i): {'name': 'Statue', 'date_published': 0} for i in range(20)}
+        catalog['future'] = {'name': 'Statue', 'date_published': 9999999999}
+        first = build_manifest(catalog, 'models', 'statue', 5, 42)
+        self.assertEqual(first, build_manifest(dict(reversed(list(catalog.items()))), 'models', 'statue', 5, 42))
+        self.assertEqual(len(first['assets']), 5)
+        self.assertNotIn('future', [a['id'] for a in first['assets']])
+        with self.assertRaises(ValueError): build_manifest(catalog, 'models', 'no match')
+
+    def test_audit_and_legacy_metadata(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'models/direct/test'
+            folder.mkdir(parents=True)
+            mesh = folder / 'mesh.glb'
+            mesh.write_bytes(b'abc')
+            spec = {'path': 'mesh.glb', 'size': 3, 'sha256': hashlib.sha256(b'abc').hexdigest()}
+            (folder / 'asset.json').write_text(json.dumps({'asset': {'id': 'test'}, 'files': [spec]}))
+            self.assertTrue(audit(root)['ok'])
+            mesh.write_bytes(b'xyz')
+            self.assertFalse(audit(root)['ok'])
+            mesh.write_bytes(b'abc')
+            (folder / 'another.part').write_bytes(b'partial')
+            self.assertFalse(audit(root)['ok'])
+
+    def test_range_416_restart(self):
+        from urllib.error import HTTPError
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'mesh'
+            target.with_name('mesh.part').write_bytes(b'abc')
+            target.with_name('mesh.part.json').write_text('{"url":"https://example.com/mesh","validator":"v1"}')
+            with patch('data_generation_server.assets.request', side_effect=[HTTPError('https://example.com/mesh', 416, 'range', {}, None), Response(b'abcdef')]) as call, patch('data_generation_server.assets.time.sleep'):
+                download({'url': 'https://example.com/mesh'}, target)
+                self.assertEqual(call.call_args_list[1].args[1], {})
+            self.assertEqual(target.read_bytes(), b'abcdef')
 
     def test_resume(self):
         with tempfile.TemporaryDirectory() as directory:

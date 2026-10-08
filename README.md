@@ -23,7 +23,7 @@ dgs-assets files horse_statue_01
 dgs-assets download --manifest configs/assets.example.json --dry-run
 
 # 下载；同一命令可以重新运行，自动检查并跳过完整文件
-dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/dataset/orbit/assets --workers 2
+dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset --workers 2
 ```
 
 示例 ID 来自官方 API 文档，可能随上游调整；若格式不可用，请用 `files` 查看后修改配置。
@@ -72,7 +72,7 @@ ZIP 文件只下载，不自动解压。不接入登录网站的页面爬取；M
 ## 输出及可恢复性
 
 ```text
-data/assets/
+dataset/
   models/polyhaven/horse_statue_01/
     horse_statue_01_2k.blend
     textures/...
@@ -115,9 +115,42 @@ API 条款：https://github.com/Poly-Haven/Public-API/blob/master/ToS.md
 也可设置 `DGS_CA_BUNDLE` 或 `SSL_CERT_FILE`。所有子命令及文件下载均使用该配置。
 
 ```bash
-dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/dataset/orbit/assets --ca-bundle /path/to/ca.pem
+dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset --ca-bundle /path/to/ca.pem
 ```
 
 临时排查可在同一命令末尾加 `--insecure`，仅对本次进程关闭 HTTPS 证书校验。
 该模式无法验证服务端身份，建议有正确 CA 后移除；默认仍开启校验。
 不支持同时指定 CA bundle 与 `--insecure`。
+
+## 批量下载与离线校验
+
+默认 root 已改为 `/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset`。
+可用 `--root` 覆盖。之前下载到别处的素材不会自动移动。
+
+```bash
+# 生成 20 个物体模型清单；固定 seed，使同一目录数据下选择可复现
+# 若网络证书正常，请移除 --insecure
+dgs-assets manifest --type models --limit 20 --seed 42 --resolution 2k --output configs/models.batch.json --insecure
+
+# 可单独生成 HDRI 清单，不要将 HDRI 当成三维场景
+dgs-assets manifest --type hdris --query outdoor --limit 5 --seed 42 --output configs/hdris.batch.json --insecure
+
+# 先查看下载计划，再下载
+dgs-assets download --manifest configs/models.batch.json --dry-run --insecure
+dgs-assets download --manifest configs/models.batch.json --workers 2 --insecure
+dgs-assets download --manifest configs/hdris.batch.json --workers 2 --insecure
+
+# 不访问网络、不依赖 Blender；检查文件是否存在、大小、MD5/SHA256及遗留 part
+dgs-assets verify
+```
+
+`manifest` 从官方目录过滤关键词（ID/元数据），排除尚未发布的素材，按 ID 排序后用固定随机种子抽样。
+它生成可编辑的选择清单，不保证每个 ID 都提供所选格式；可用 download --dry-run 确认。
+关键词是子串匹配，不是语义搜索。上游目录变化时抽样也可能变化，因此应保存生成的清单。
+物体、纹理、HDRI 分开建清单；完整三维场景和人物仍通过 direct 清单加入。
+
+`verify` 默认生成 dataset/verification-report.json；无完整素材、文件损坏、元数据异常或遗留 .part 时退出码为 1。
+报告只检查已存在的 asset.json，不证明某个下载清单的所有资产均已完成；下载失败还应查看 download-report.json。
+发现损坏后重新执行原下载清单即可修复。不自动删除素材。
+兼容旧版 asset.json 的资产目录相对路径，新版额外保存 dataset_path，方便渲染批量读取。
+校验阶段不会检查 Blender 加载、贴图绑定或模型视觉质量，这些需后续试渲染。

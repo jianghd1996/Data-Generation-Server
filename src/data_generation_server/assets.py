@@ -7,12 +7,15 @@ import os
 import ssl
 from pathlib import Path
 import re
+import random
 import time
 from urllib.parse import urlencode, urlparse, unquote
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError
 
 API = 'https://api.polyhaven.com'
 TLS_CONTEXT = None
+DEFAULT_ROOT = Path('/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset')
 
 UA = 'Data-Generation-Server/0.1 (https://github.com/jianghd1996/Data-Generation-Server)'
 
@@ -109,9 +112,12 @@ def download(spec, target):
             result = {'url': spec['url'], 'size': target.stat().st_size, 'sha256': digest(target, 'sha256')}
             write_json(receipt, result)
             return result
-        except Exception:
+        except Exception as exc:
             if attempt == 3:
                 raise
+            if isinstance(exc, HTTPError) and exc.code == 416:
+                partial.unlink(missing_ok=True)
+                state.unlink(missing_ok=True)
             # A fully received partial may yield HTTP 416 on retry: restart it.
             if partial.exists() and spec.get('size') == partial.stat().st_size:
                 partial.unlink()
@@ -163,18 +169,59 @@ def validate_assets(assets):
 def acquire(asset, root, dry_run=False):
     folder = root / asset['kind'] / asset['provider'] / asset['id']
     metadata, files = resolve(asset)
+    if not files:
+        raise ValueError('Asset has no files')
     paths = [safe_path(folder, f['path']) for f in files]
     if len(paths) != len(set(paths)):
         raise ValueError('Duplicate download paths')
     result = {'asset': asset, **metadata, 'files': []}
     for spec, path in zip(files, paths):
-        record = {'path': str(path.relative_to(root)), **spec}
+        record = {**spec, 'path': str(path.relative_to(folder)), 'dataset_path': str(path.relative_to(root))}
         if not dry_run:
             record.update(download(spec, path))
         result['files'].append(record)
     if not dry_run:
         write_json(folder / 'asset.json', result)
     return result
+
+
+
+def build_manifest(catalog, kind, query='', limit=20, seed=0, resolution='2k', fmt=None):
+    if limit < 1:
+        raise ValueError('limit must be positive')
+    candidates = [slug for slug, info in sorted(catalog.items())
+                  if info.get('date_published', 0) <= time.time()
+                  and (not query or query.lower() in (slug + ' ' + json.dumps(info, ensure_ascii=False)).lower())]
+    random.Random(seed).shuffle(candidates)
+    assets = [{'provider': 'polyhaven', 'id': slug, 'kind': kind,
+               'resolution': resolution, 'format': fmt or ('hdr' if kind == 'hdris' else 'blend')}
+              for slug in candidates[:limit]]
+    if not assets:
+        raise ValueError('No matching published assets')
+    return {'version': 1, 'selection': {'query': query, 'seed': seed, 'requested': limit,
+                                      'matched': len(candidates)}, 'assets': assets}
+
+
+def audit(root):
+    results = []
+    for metadata in sorted(root.glob('*/*/*/asset.json')):
+        errors = []
+        try:
+            data = json.loads(metadata.read_text())
+            files = data['files']
+            if not files:
+                errors.append('No files recorded')
+            for spec in files:
+                path = safe_path(metadata.parent, spec['path'])
+                if not verify(path, spec):
+                    errors.append(f"Missing or corrupt: {spec['path']}")
+            results.append({'metadata': str(metadata.relative_to(root)), 'asset': data['asset'],
+                            'ok': not errors, 'errors': errors})
+        except Exception as exc:
+            results.append({'metadata': str(metadata.relative_to(root)), 'ok': False, 'errors': [str(exc)]})
+    partials = [str(p.relative_to(root)) for p in sorted(root.rglob('*.part'))]
+    return {'version': 1, 'scope': 'download integrity only; not Blender load/render validation',
+            'assets': results, 'partials': partials, 'ok': bool(results) and all(r['ok'] for r in results) and not partials}
 
 
 def main(argv=None):
@@ -189,13 +236,29 @@ def main(argv=None):
     inspect.add_argument('id')
     fetch = sub.add_parser('download')
     fetch.add_argument('--manifest', type=Path, required=True)
-    fetch.add_argument('--root', type=Path, default=Path('data/assets'))
+    fetch.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     fetch.add_argument('--workers', type=int, default=2)
     fetch.add_argument('--dry-run', action='store_true')
-    for command_parser in (search, inspect, fetch):
+    batch = sub.add_parser('manifest', help='Generate a reproducible Poly Haven batch manifest')
+    batch.add_argument('--type', choices=['models', 'hdris', 'textures'], default='models')
+    batch.add_argument('--query', default='')
+    batch.add_argument('--limit', type=int, default=20)
+    batch.add_argument('--seed', type=int, default=0)
+    batch.add_argument('--resolution', default='2k')
+    batch.add_argument('--format')
+    batch.add_argument('--output', type=Path, required=True)
+    check = sub.add_parser('verify', help='Offline audit of completed assets and partial downloads')
+    check.add_argument('--root', type=Path, default=DEFAULT_ROOT)
+    check.add_argument('--output', type=Path)
+    for command_parser in (search, inspect, fetch, batch):
         command_parser.add_argument('--ca-bundle', type=Path, help='PEM CA bundle; defaults to DGS_CA_BUNDLE or SSL_CERT_FILE')
         command_parser.add_argument('--insecure', action='store_true', help='Disable TLS verification for this invocation')
     args = parser.parse_args(argv)
+    if args.command == 'verify':
+        report = audit(args.root.resolve())
+        write_json(args.output or args.root / 'verification-report.json', report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0 if report['ok'] else 1
     global TLS_CONTEXT
     ca_bundle = args.ca_bundle or os.environ.get('DGS_CA_BUNDLE') or os.environ.get('SSL_CERT_FILE')
     if args.insecure and ca_bundle:
@@ -203,6 +266,12 @@ def main(argv=None):
     TLS_CONTEXT = ssl._create_unverified_context() if args.insecure else ssl.create_default_context(cafile=str(ca_bundle) if ca_bundle else None)
     if args.insecure:
         print('WARNING: TLS certificate verification is disabled for this invocation.')
+    if args.command == 'manifest':
+        catalog = api('/assets?' + urlencode({'type': args.type}))
+        manifest = build_manifest(catalog, args.type, args.query, args.limit, args.seed, args.resolution, args.format)
+        write_json(args.output, manifest)
+        print(f"Wrote {len(manifest['assets'])} assets to {args.output}")
+        return 0
     if args.command == 'files':
         print(json.dumps(api('/files/' + args.id), indent=2)); return 0
     if args.command == 'search':
