@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from .assets import DEFAULT_ROOT
+from .trajectory import camera_angles, orientation_size
 
 
 def orbit_positions(frames, radius, elevation, start, sweep, target):
@@ -51,7 +52,11 @@ def main(argv=None):
     parser.add_argument('--output', type=Path)
     parser.add_argument('--blender', default='blender')
     parser.add_argument('--device', choices=['CUDA', 'OPTIX', 'CPU'], default='CUDA')
-    parser.add_argument('--frames', type=int, default=81)
+    parser.add_argument('--frames', type=int, default=121)
+    parser.add_argument('--trajectory', choices=['figure8', 'orbit'], default='figure8')
+    parser.add_argument('--theta', type=float, default=30)
+    parser.add_argument('--phi', type=float, default=5)
+    parser.add_argument('--orientation', choices=['random', 'landscape', 'portrait', 'keep'], default='random')
     parser.add_argument('--fps', type=int, default=24)
     parser.add_argument('--width', type=int, default=1280)
     parser.add_argument('--height', type=int, default=720)
@@ -73,6 +78,11 @@ def main(argv=None):
         parser.error('width and height must be even')
     if min(args.radius, args.subject_size, args.focal_mm) <= 0 or not -89 < args.elevation < 89:
         parser.error('positive radius/size/focal length and elevation between -89 and 89 required')
+    try:
+        angles = camera_angles(args.trajectory, args.frames, args.start_angle, args.elevation, args.sweep, args.theta, args.phi)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.width, args.height, selected_orientation = orientation_size(args.orientation, args.width, args.height, args.seed)
     root = args.root.resolve()
     scene_file = args.scene.resolve() if args.scene else None
     if scene_file and (not scene_file.is_file() or scene_file.suffix.lower() != '.blend'):
@@ -105,11 +115,13 @@ def main(argv=None):
     output.mkdir(parents=True, exist_ok=True)
     config = {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}
     config.update(model=str(model), hdri=str(hdri) if hdri else None, scene=str(scene_file) if scene_file else None, output=str(output))
+    config['camera_angles'] = angles
+    config['selected_orientation'] = selected_orientation
     config_path = output / 'render-config.json'
     config_path.write_text(json.dumps(config, indent=2))
     script = Path(__file__).with_name('blender_orbit.py')
     command = [blender, '--background', '--factory-startup', '--python-exit-code', '1', '--python', str(script), '--', '--config', str(config_path)]
-    print('Rendering into', output, flush=True)
+    print(f'Rendering {args.trajectory}: {args.width}x{args.height}, {args.frames} frames into {output}', flush=True)
     subprocess.run(command, check=True)
     for folder in ('rgb', 'mask', 'depth'):
         suffix = '.exr' if folder == 'depth' else '.png'

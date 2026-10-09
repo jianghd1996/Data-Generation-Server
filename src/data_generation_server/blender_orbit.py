@@ -213,7 +213,8 @@ def main():
     bpy.ops.object.camera_add()
     camera = bpy.context.object
     scene.camera = camera
-    camera.data.lens = cfg['focal_mm']
+    # Preserve field of view on the short image axis when orientation changes.
+    camera.data.lens = cfg['focal_mm'] * min(cfg['width'], cfg['height']) / cfg['width'] * (1280 / 720)
     camera.data.sensor_width = 36
     camera.data.sensor_fit = 'HORIZONTAL'
     camera.data.clip_start = 0.01
@@ -242,23 +243,24 @@ def main():
         file_output.format.color_depth = '32' if fmt == 'OPEN_EXR' else '8'
         tree.links.new(socket, file_output.inputs[0])
     scene.render.use_compositing = True
-    fx = cfg['focal_mm'] / 36 * cfg['width']
+    fx = camera.data.lens / 36 * cfg['width']
     cv_axis = Matrix.Diagonal((1, -1, -1, 1))
     cameras = {'width': cfg['width'], 'height': cfg['height'], 'fps': cfg['fps'],
                'K': [[fx, 0, cfg['width'] / 2], [0, fx, cfg['height'] / 2], [0, 0, 1]],
                'world_axes': 'Blender: Z up', 'camera_axes': 'OpenCV: X right, Y down, Z forward',
                'depth': 'Blender Z pass: camera-to-surface distance in normalized scene units; background may be very large',
                'mask': 'white subject, black background; antialiased boundaries', 'frames': []}
-    elevation = math.radians(cfg['elevation'])
     for index in range(cfg['frames']):
         frame = index + 1
-        angle = math.radians(cfg['start_angle'] + cfg['sweep'] * index / (cfg['frames'] - 1))
+        azimuth_deg, elevation_deg = cfg['camera_angles'][index]
+        angle = math.radians(azimuth_deg)
+        elevation = math.radians(elevation_deg)
         camera.location = target + Vector((cfg['radius'] * math.cos(elevation) * math.cos(angle), cfg['radius'] * math.cos(elevation) * math.sin(angle), cfg['radius'] * math.sin(elevation)))
         camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
         scene.frame_set(frame)
         bpy.context.view_layer.update()
         c2w = camera.matrix_world @ cv_axis
-        cameras['frames'].append({'frame': frame, 'time': index / cfg['fps'], 'rgb': f'rgb/rgb_{frame:04d}.png',
+        cameras['frames'].append({'frame': frame, 'azimuth_deg': azimuth_deg, 'elevation_deg': elevation_deg, 'time': index / cfg['fps'], 'rgb': f'rgb/rgb_{frame:04d}.png',
                                   'mask': f'mask/mask_{frame:04d}.png', 'depth': f'depth/depth_{frame:04d}.exr',
                                   'c2w': [list(row) for row in c2w], 'w2c': [list(row) for row in c2w.inverted()]})
         scene.render.filepath = str(output / 'rgb' / f'rgb_{frame:04d}.png')
@@ -267,7 +269,7 @@ def main():
     save_json(output / 'cameras.json', cameras)
     bpy.ops.wm.save_as_mainfile(filepath=str(output / 'scene.blend'))
     environment_label = 'a 3D environment' if cfg.get('scene') or cfg.get('environment') == 'courtyard' else 'a flat ground plane'
-    (output / 'prompt.txt').write_text(f'A static subject in {environment_label}. The camera smoothly orbits around the subject.\n')
+    (output / 'prompt.txt').write_text(f'A static subject in {environment_label}. The camera follows a smooth spherical trajectory around the subject.\n')
     save_json(output / 'render-report.json', {'ok': True, 'devices': devices, 'blender': bpy.app.version_string,
         'frames': cfg['frames'], 'elapsed_seconds': time.monotonic() - started, 'missing_textures': [],
         'source_model': cfg['model'], 'source_hdri': cfg['hdri'], 'source_scene': cfg.get('scene'),

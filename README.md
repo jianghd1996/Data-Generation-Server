@@ -254,3 +254,33 @@ CUDA_VISIBLE_DEVICES=3 dgs-render \
 仅支持静态场景：对象动画被冻结，但物理模拟、材质/节点动画和特殊驱动应先在 Blender 中烘焙或移除。
 不会自动寻找空地、吸附复杂地形、检测碰撞或避让墙壁。请设置位置、半径，并先做 3 帧测试。
 主角可能被环境遮挡；主体 mask 仅包含实际可见部分。原环境对象索引清零，确保不混入主体 mask。
+
+## 121 帧球面双环轨迹与随机横竖屏
+
+```bash
+# 自动找已下载的 HDRI，渲染 chinese_cabinet + 庭院并编码 video.mp4
+bash scripts/test_figure8.sh
+
+# 示例参数覆盖；使用不同输出目录
+DGS_THETA=40 DGS_PHI=8 DGS_SEED=123 DGS_ORIENTATION=portrait \
+DGS_OUTPUT=/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_figure8_portrait \
+bash scripts/test_figure8.sh
+```
+
+dgs-render 新默认：`--trajectory figure8 --frames 121 --theta 30 --phi 5 --orientation random`。
+分辨率为 1280×720 或 720×1280，横竖屏用 seed 可复现抽样，实际尺寸记录在 render-config.json。
+`--orientation landscape/portrait` 固定方向；`keep` 保留显式 width/height 顺序。
+横竖屏保持短边方向的视场角，防止竖屏时主体突然放大或被裁切；camera K 按实际焦距记录。
+
+以初始方位角/仰角为 (0,0) 偏移，轨迹节点为：
+右环 `(0,0) → (0,+φ) → (+θ,+φ) → (+θ,-φ) → (0,-φ) → (0,0)`；
+左环 `(0,0) → (0,+φ) → (-θ,+φ) → (-θ,-φ) → (0,-φ) → (0,0)`。
+这严格按所指定的十段动作实现两个镜像环，不是正弦形式的连续数学 8 字曲线。
+121 帧包含 120 个时间间隔，每段 12 个间隔；第 1/61/121 帧位姿一致，共享中间帧只渲染一次。
+各段用五次缓入缓出，在转角平滑停顿，避免方向突然跳变；不是全程匀速。
+固定球面半径、全程看向球心，无 roll；右移按初始相机视角对应方位角增大。
+默认初始方位 -90°、仰角 12°，因此 φ=5 时实际仰角在 7°–17°。
+`--start-angle` 决定初始面向主体的位置；模型正面朝向依赖资产，可用 --subject-heading 调整。
+`--trajectory orbit --frames 81 --orientation landscape` 可继续使用原来的单圈轨迹。
+自动用 ffmpeg 将完整 121 帧序列编码为单个 video.mp4（24fps 时约 5.04 秒），不单独编码拼接左右段。
+需安装 ffmpeg；--no-video 仅输出帧。当前会话无法访问服务器 GPU，本地只验证轨迹和启动逻辑。
