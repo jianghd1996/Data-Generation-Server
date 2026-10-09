@@ -313,3 +313,86 @@ dgs-people --provider humano3d --archive /absolute/path/people.zip
 解压拒绝越界路径、符号链接及大于 20GiB 的归档；ZIP CRC 错误会中止，不替换旧的已解压内容。
 人物可在场景内使用，但模型采用各供应商许可，不是 CC0；下载与渲染许可不等同于训练或公开数据集许可。
 此实现已检索到 Renderpeople 官方直链，但当前执行环境未实际下载该二进制 ZIP；需服务器验证。
+
+## 数据扩充、数量检查与批量组合
+
+### 1. 扩充物体与背景，检查缺口
+
+```bash
+python -m pip install -e .
+bash scripts/expand_assets.sh
+```
+
+下载 24 个物体候选、24 个 HDRI 候选，留出格式/下载失败余量；已有清单保留，重跑会续传。
+最后生成 dataset/catalog.json 和 coverage-report.json。默认目标 **每类至少 11 个**。
+库存检查对象：objects（物体）、people（人物）、scenes（场景）、backgrounds（HDRI）。
+检查缺口时退出码为 1 是正常结果，不表示全部下载失败。每个下载清单也有自己的成功/失败输出。
+本脚本会用 --insecure，保持与你当前代理环境一致；有可信 CA 时应替换为 --ca-bundle。
+
+```bash
+dgs-dataset inventory
+```
+
+catalog.json 列出模型路径、SHA256、enabled、review 和可选 notes。
+检查后将 review 设为 approved，不合适的素材 enabled=false。再次 inventory 保留审核信息。
+同一人物的 LOD、格式、换色不应计为多个人：检查后给它们填写相同的 identity 字符串。
+脚本按常见命名和同文件哈希尽量去重，但不能自动识别同一人的不同姿态。
+数量报告同时列出候选数量、unique_identities、approved、procedural 和 external；文件存在不代表视觉合格。
+
+**场景现状**：内置 12 个庭院布局/色调参数变体，不是 12 个独立下载的高质量环境；报告会单列来源类型。
+要扩充独立三维场景，请把带依赖的 .blend 场景放到 dataset/scenes/，再 inventory。
+也可在 catalog.scenes 手动注册 `{ "id":"room01", "path":"/absolute/path/room.blend", "position":[0,0,0], "enabled":true, "review":"approved" }`。
+场景位置是主体脚底/底面中心，应由你检查空地与相机路径，不自动做碰撞避免。
+
+**人物现状**：已验证公开直链只覆盖当前一个样例，不能声称已达到 11 人。
+从 Renderpeople/Humano3D 领取更多样例/许可模型后，可逐包导入独立 ID：
+
+```bash
+dgs-people --provider humano3d --archive /path/sample02.zip --id humano_sample02
+dgs-people --provider renderpeople --url '官方文件直链' --id renderpeople_sample03 --insecure
+dgs-dataset inventory
+```
+
+不注册账号、不自动购买模型；新增人物文件也可直接放在 dataset/people/ 下。
+
+### 2. 生成固定组合清单
+
+```bash
+# 每个主体选一个随机场景×HDRI组合，每个组合生成6条视频（近中远×横竖屏）
+dgs-dataset plan --catalog dataset/catalog.json --output dataset/render-plan.json \
+  --combinations-per-subject 1 --seed 42
+
+# 每个主体选3种组合；正式数据可加 --approved-only，只使用审核通过的素材
+# --all-combinations 会枚举全部：N主体×N场景×N背景×6，数量可能非常大
+```
+
+默认包含待检查候选，适合先出样例；正式计划建议 --approved-only。
+每个组合固定 121 帧、θ30°/φ5°、720P。计划 settings 中可批量调整 frames/theta/phi/samples/radius。
+每条视频使用不同输出目录，横竖屏成对，模型/场景/背景组合保持一致。
+计划保存了绝对路径，重新抽样前应另存计划，保证实验可复现。
+
+### 3. 先运行一个组合的6条视频
+
+```bash
+dgs-dataset run --plan dataset/render-plan.json \
+  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender --limit 6
+
+# 确认后跑剩余任务：完成且配置一致的任务跳过，失败不阻断其他组合
+CUDA_VISIBLE_DEVICES=3 dgs-dataset run --plan dataset/render-plan.json \
+  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
+  --retry-incomplete
+```
+
+run 按顺序启动 Blender，每条任务GPU加载一次，避免同时抢显存；报告逐条写入 render-plan.run-report.json。
+--retry-incomplete 会覆盖不完整/参数变化任务的管线输出并重渲染，不做逐帧恢复。
+模型下载仍可在另一个终端继续。不要多个渲染进程写同一输出目录。
+
+### 景别定义及校验
+
+- 物体近/中/远：以完整主体为目标，预期占画面比例约85%/64%/40%，宽主体由水平视场限制距离。
+- 人物近：高度0.65到1.0（胸部—头部）；中：0.28到1.0（膝盖—头部）；远：原球面半径4.5、全身中心。
+- 人物近/中按取景区域的中心改变球心，再根据竖直视场计算球面半径；全过程朝球心，保持8字路径。
+- catalog.people 中 chest/knee 是0–1高度比例，可针对人物姿态调整；heading 为正面旋转角，size 为最长边归一化大小。
+- 这是包围盒近似，不是骨骼检测。手臂抬高、坐姿、道具、宽衣服可能改变包围盒，需你检查首帧及全过程。
+- 横竖屏按同样景别重新算距离，人物近中景裁切下半身是预期；远景保留你已验证的距离。
+- framing.target、effective_radius 写入 cameras.json 与 render-report.json，可检查实际距离；不同角度可能改变裁切边界。

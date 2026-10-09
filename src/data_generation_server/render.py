@@ -62,6 +62,11 @@ def main(argv=None):
     parser.add_argument('--height', type=int, default=720)
     parser.add_argument('--samples', type=int, default=32)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--subject-kind', choices=['object', 'person'], default='object')
+    parser.add_argument('--shot', choices=['manual', 'near', 'medium', 'far'], default='manual')
+    parser.add_argument('--person-chest', type=float, default=0.65)
+    parser.add_argument('--person-knee', type=float, default=0.28)
+    parser.add_argument('--scene-preset', type=int, default=0)
     parser.add_argument('--subject-size', type=float, default=2.0)
     parser.add_argument('--radius', type=float, default=4.5)
     parser.add_argument('--elevation', type=float, default=12.0)
@@ -83,6 +88,8 @@ def main(argv=None):
     except ValueError as exc:
         parser.error(str(exc))
     args.width, args.height, selected_orientation = orientation_size(args.orientation, args.width, args.height, args.seed)
+    if not 0 <= args.person_knee < args.person_chest < 1:
+        parser.error('Require 0 <= knee < chest < 1')
     root = args.root.resolve()
     scene_file = args.scene.resolve() if args.scene else None
     if scene_file and (not scene_file.is_file() or scene_file.suffix.lower() != '.blend'):

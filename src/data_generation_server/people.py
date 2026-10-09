@@ -1,6 +1,7 @@
 """Download and unpack official posed-human samples."""
 import argparse
 import json
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -50,6 +51,7 @@ def unpack(archive, folder):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Download Renderpeople sample or supplied Humano3D ZIP')
     parser.add_argument('--provider', choices=['renderpeople', 'humano3d'], default='renderpeople')
+    parser.add_argument('--id', help='Unique asset ID for an additional archive; avoids replacing prior samples')
     parser.add_argument('--url', help='Actual authorized ZIP download URL, not product page')
     parser.add_argument('--archive', type=Path, help='Already downloaded local ZIP')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
@@ -61,7 +63,9 @@ def main(argv=None):
     if args.provider == 'humano3d' and not (args.url or args.archive):
         parser.error('Humano3D requires a ZIP URL or archive obtained from its free-sample checkout')
     root = args.root.resolve()
-    asset_id = args.provider + '_free_posed'
+    asset_id = args.id or args.provider + '_free_posed'
+    if not re.fullmatch(r'[A-Za-z0-9_-]+', asset_id):
+        parser.error('--id must contain only letters, digits, underscores or hyphens')
     folder = root / 'people' / 'direct' / asset_id
     if args.archive:
         archive = args.archive.resolve()

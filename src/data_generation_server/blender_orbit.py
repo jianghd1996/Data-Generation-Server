@@ -5,6 +5,10 @@ import math
 from pathlib import Path
 import sys
 import time
+import random
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from shots import shot_setup
 import bpy
 from mathutils import Matrix, Vector
 
@@ -36,9 +40,13 @@ def cube(name, location, dimensions, material):
     return obj
 
 
-def make_courtyard(origin):
+def make_courtyard(origin, preset=0):
     """Small deterministic geometric environment; no extra asset download required."""
-    stone = surface('CourtyardStone', (0.44, 0.40, 0.34))
+    rng = random.Random(preset)
+    tint = rng.uniform(-0.08, 0.08)
+    half_width = 10 + preset % 4
+    half_depth = 10 + (preset // 4) % 3
+    stone = surface('CourtyardStone', (0.44 + tint, 0.40 + tint, 0.34 + tint))
     plaster = surface('CourtyardPlaster', (0.68, 0.61, 0.49))
     dark = surface('CourtyardTrim', (0.14, 0.18, 0.18))
     cube('CourtyardBase', origin + Vector((0, 0, -0.14)), (28, 28, 0.25), stone)
@@ -46,14 +54,14 @@ def make_courtyard(origin):
     for x in range(-10, 11):
         for y in range(-10, 11):
             cube(f'Paver_{x}_{y}', origin + Vector((x, y, -0.035)), (0.98, 0.98, 0.05), tiles[(x * 7 + y * 3) % 5])
-    for y in (-11, 11):
-        cube('CourtyardWall', origin + Vector((0, y, 2)), (23, 0.3, 4), plaster)
-        cube('WallCap', origin + Vector((0, y, 4.05)), (23.2, 0.45, 0.15), stone)
+    for y in (-half_depth, half_depth):
+        cube('CourtyardWall', origin + Vector((0, y, 2)), (2 * half_width + 1, 0.3, 4), plaster)
+        cube('WallCap', origin + Vector((0, y, 4.05)), (2 * half_width + 1.2, 0.45, 0.15), stone)
         for x in (-9, -6, -3, 0, 3, 6, 9):
             cube('WallPillar', origin + Vector((x, y - (0.22 if y > 0 else -0.22), 2)), (0.4, 0.6, 4.1), stone)
             cube('WallPanel', origin + Vector((x + 1.1, y - (0.18 if y > 0 else -0.18), 2)), (1.3, 0.08, 1.8), dark)
-    for x in (-11, 11):
-        cube('SideWall', origin + Vector((x, 0, 1.2)), (0.3, 22, 2.4), plaster)
+    for x in (-half_width, half_width):
+        cube('SideWall', origin + Vector((x, 0, 1.2)), (0.3, 2 * half_depth, 2.4), plaster)
     for x, y in [(-8, -7), (8, -7), (-8, 7), (8, 7)]:
         cube('Planter', origin + Vector((x, y, 0.4)), (1.4, 1.4, 0.8), stone)
         for i in range(5):
@@ -179,11 +187,14 @@ def main():
     normalizer.location = placement - rotation @ (center * scale)
     for obj in geometry: obj.pass_index = 1
     bpy.context.view_layer.update()
-    target = placement + Vector((0, 0, size.z * scale / 2))
+    target_height, effective_radius = shot_setup(cfg.get('subject_kind', 'object'), cfg.get('shot', 'manual'), size.z * scale, max(size.x, size.y) * scale, cfg['width'], cfg['height'], cfg['focal_mm'], cfg['radius'], cfg['elevation'], cfg['phi'], cfg.get('person_chest', 0.65), cfg.get('person_knee', 0.28))
+    target = placement + Vector((0, 0, target_height))
+    framing = {'shot': cfg.get('shot', 'manual'), 'subject_kind': cfg.get('subject_kind', 'object'), 'target': list(target), 'effective_radius': effective_radius, 'method': 'bounding-box approximation; review anatomical framing'}
+    print('[framing]', framing, flush=True)
 
     if not cfg.get('scene'):
         if cfg.get('environment') == 'courtyard':
-            make_courtyard(placement)
+            make_courtyard(placement, cfg.get('scene_preset', 0))
         else:
             bpy.ops.mesh.primitive_plane_add(size=200, location=placement + Vector((0, 0, -0.005)))
             ground = bpy.context.object
@@ -249,13 +260,13 @@ def main():
                'K': [[fx, 0, cfg['width'] / 2], [0, fx, cfg['height'] / 2], [0, 0, 1]],
                'world_axes': 'Blender: Z up', 'camera_axes': 'OpenCV: X right, Y down, Z forward',
                'depth': 'Blender Z pass: camera-to-surface distance in normalized scene units; background may be very large',
-               'mask': 'white subject, black background; antialiased boundaries', 'frames': []}
+               'mask': 'white subject, black background; antialiased boundaries', 'framing': framing, 'frames': []}
     for index in range(cfg['frames']):
         frame = index + 1
         azimuth_deg, elevation_deg = cfg['camera_angles'][index]
         angle = math.radians(azimuth_deg)
         elevation = math.radians(elevation_deg)
-        camera.location = target + Vector((cfg['radius'] * math.cos(elevation) * math.cos(angle), cfg['radius'] * math.cos(elevation) * math.sin(angle), cfg['radius'] * math.sin(elevation)))
+        camera.location = target + Vector((effective_radius * math.cos(elevation) * math.cos(angle), effective_radius * math.cos(elevation) * math.sin(angle), effective_radius * math.sin(elevation)))
         camera.rotation_euler = (target - camera.location).to_track_quat('-Z', 'Y').to_euler()
         scene.frame_set(frame)
         bpy.context.view_layer.update()
@@ -271,7 +282,7 @@ def main():
     environment_label = 'a 3D environment' if cfg.get('scene') or cfg.get('environment') == 'courtyard' else 'a flat ground plane'
     (output / 'prompt.txt').write_text(f'A static subject in {environment_label}. The camera follows a smooth spherical trajectory around the subject.\n')
     save_json(output / 'render-report.json', {'ok': True, 'devices': devices, 'blender': bpy.app.version_string,
-        'frames': cfg['frames'], 'elapsed_seconds': time.monotonic() - started, 'missing_textures': [],
+        'framing': framing, 'frames': cfg['frames'], 'elapsed_seconds': time.monotonic() - started, 'missing_textures': [],
         'source_model': cfg['model'], 'source_hdri': cfg['hdri'], 'source_scene': cfg.get('scene'),
         'environment': cfg.get('environment'), 'subject_position': list(placement), 'subject_heading': cfg.get('subject_heading', 0), 'normalization_scale': scale,
         'source_bounds': [list(lower), list(upper)], 'geometry_objects': [obj.name for obj in geometry]})
