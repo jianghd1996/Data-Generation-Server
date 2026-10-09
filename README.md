@@ -589,3 +589,25 @@ Barcelona Pavilion 原包可能缺少 `.blend` 引用的 `water bump.jpg`，但�
 找到后打印 `[placement]`，实际坐标写入 render-report.json 的 subject_position。
 找不到则报错，仍可手动指定 subject-position。该检查不保证整个主体体积无碰撞或语义上合适；
 试渲染确认后，将实际坐标填入 catalog.scenes 的 position，再重新生成批量 plan。
+
+
+### 所有素材组合的单帧检查
+
+扫描后创建全部启用的 object/human × scene × background 组合；每个组合一张 720P 横屏远景。
+外部场景自动寻找支撑和无遮挡位置，程序场景沿用设置。保留 RGB/mask/depth/报告，不编码视频，
+不重复保存 scene.blend。第一帧检查不能保证所有景别、横竖屏和轨迹帧均正常。
+
+```bash
+dgs-dataset inventory --root "$DGS_ROOT"
+dgs-dataset preview --catalog "$DGS_ROOT/catalog.json" --output "$DGS_ROOT/preview-plan.json" --render-root "$DGS_ROOT/renders/asset-previews" --samples 16
+dgs-dataset run --plan "$DGS_ROOT/preview-plan.json" --blender "$DGS_BLENDER" --gpus 0,1,2,3 --retry-incomplete
+```
+
+inventory 的数量不足退出码 1 不影响 preview 读取已生成的 catalog；不要用 && 将两者连起来。
+preview 打印实际图片数量（32 主体 × 14 场景 × 24 背景 = 10752 张）。
+默认包括 12 个庭院变体；只检查下载场景，可给 preview 增加 `--external-scenes-only`。
+run 重复执行会跳过完成项；失败详情在 preview-plan.run-report.json 和对应 logs 目录。
+
+`renders/asset-previews/index.html` 是静态分页检查页，支持主体搜索、场景/背景筛选，每页 48 项，
+RGB 图、mask 和报告链接。下载整个预览目录后可在 Windows 浏览器打开 index.html。
+渲染过程中可刷新检查页查看新增结果，未生成与失败项显示“待生成或失败”，以批次报告为准。

@@ -13,8 +13,11 @@ def orientation_size(orientation, width, height, seed):
 
 
 def camera_angles(trajectory, frames, start, elevation, sweep, theta, phi):
-    if frames < 2:
-        raise ValueError('At least two frames required')
+    if frames < 1:
+        raise ValueError('At least one frame required')
+    if frames == 1:
+        # Use the full-trajectory validator, then return its initial viewpoint.
+        return camera_angles(trajectory, 2, start, elevation, sweep, theta, phi)[:1]
     if trajectory == 'orbit':
         return [(start + sweep * i / (frames - 1), elevation) for i in range(frames)]
     if theta <= 0 or phi <= 0 or abs(elevation) + phi >= 89:

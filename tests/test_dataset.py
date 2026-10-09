@@ -111,3 +111,39 @@ class SamplingTests(unittest.TestCase):
             paired = plan_jobs(catalog, root / 'paired', environment_sampling='per-combination')
             self.assertEqual(len({(j['scene']['id'], j['background']['id']) for j in paired['jobs']}), 1)
             with self.assertRaises(ValueError): plan_jobs(catalog, root, external_scenes_only=True)
+
+
+class PreviewTests(unittest.TestCase):
+    def test_all_pairs_single_image_flags_and_resume(self):
+        import json
+        from data_generation_server.dataset import preview_jobs, job_complete
+        from data_generation_server.preview_gallery import write_gallery
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / 'model.glb'; model.touch()
+            sky = root / 'sky.hdr'; sky.touch()
+            scene = root / 'scene.blend'; scene.touch()
+            catalog = {'root': str(root), 'objects': [{'id': 'object', 'path': str(model)}],
+                       'people': [{'id': 'person', 'path': str(model)}],
+                       'scenes': [{'id': 'external', 'path': str(scene)}, {'id': 'court', 'environment': 'courtyard', 'preset': 0}],
+                       'backgrounds': [{'id': 'sky1', 'path': str(sky)}, {'id': 'sky2', 'path': str(sky)}]}
+            plan = preview_jobs(catalog, root / 'previews')
+            self.assertEqual(len(plan['jobs']), 8)
+            self.assertEqual(plan['settings']['frames'], 1)
+            job = plan['jobs'][0]
+            command = command_for(job, plan['settings'], '/blender', str(root))
+            for flag in ('--no-video', '--no-save-scene', '--auto-place'): self.assertIn(flag, command)
+            gallery = write_gallery(plan, root / 'previews')
+            self.assertTrue(gallery.is_file())
+            output = Path(job['output']); output.mkdir()
+            flags = command[3:]
+            config = dict(plan['settings'], model=str(model), hdri=str(sky), shot='far', selected_orientation='landscape',
+                          subject_heading=0, subject_size=2, person_chest=.65, person_knee=.28,
+                          seed=42, scene=str(scene), scene_preset=0, subject_position=[0,0,0], auto_place=True)
+            (output / 'render-config.json').write_text(json.dumps(config))
+            (output / 'SUCCESS.json').write_text(json.dumps({'frames':1, 'video_encoded':False}))
+            self.assertFalse(job_complete(job, plan['settings']))
+            for folder, filename in [('rgb','rgb_0001.png'),('mask','mask_0001.png'),('depth','depth_0001.exr')]:
+                (output / folder).mkdir()
+                (output / folder / filename).touch()
+            self.assertTrue(job_complete(job, plan['settings']))

@@ -46,6 +46,7 @@ def main(argv=None):
     parser.add_argument('--scene', type=Path, help='Complete .blend environment; retains world and lights')
     parser.add_argument('--environment', choices=['studio', 'courtyard'], default='studio')
     parser.add_argument('--subject-position', type=float, nargs=3, default=[0, 0, 0], metavar=('X', 'Y', 'Z'))
+    parser.add_argument('--no-save-scene', action='store_true', help='Do not duplicate the loaded scene into output')
     parser.add_argument('--auto-place', action='store_true', help='Find nearby floor and unobstructed camera views in external scene')
     parser.add_argument('--subject-heading', type=float, default=0)
     parser.add_argument('--model-id', default='horse_statue_01')
@@ -78,8 +79,8 @@ def main(argv=None):
     parser.add_argument('--no-video', action='store_true')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args(argv)
-    if args.frames < 2 or min(args.width, args.height, args.samples, args.fps) <= 0:
-        parser.error('frames >= 2 and positive resolution/samples/fps required')
+    if args.frames < 1 or min(args.width, args.height, args.samples, args.fps) <= 0:
+        parser.error('frames >= 1 and positive resolution/samples/fps required')
     if args.width % 2 or args.height % 2:
         parser.error('width and height must be even')
     if min(args.radius, args.subject_size, args.focal_mm) <= 0 or not -89 < args.elevation < 89:

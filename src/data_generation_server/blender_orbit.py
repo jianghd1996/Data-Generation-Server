@@ -317,7 +317,8 @@ def main():
         print(f'[orbit] frame {frame}/{cfg["frames"]}', flush=True)
         bpy.ops.render.render(write_still=True)
     save_json(output / 'cameras.json', cameras)
-    bpy.ops.wm.save_as_mainfile(filepath=str(output / 'scene.blend'))
+    if not cfg.get('no_save_scene'):
+        bpy.ops.wm.save_as_mainfile(filepath=str(output / 'scene.blend'))
     environment_label = 'a 3D environment' if cfg.get('scene') or cfg.get('environment') == 'courtyard' else 'a flat ground plane'
     (output / 'prompt.txt').write_text(f'A static subject in {environment_label}. The camera follows a smooth spherical trajectory around the subject.\n')
     save_json(output / 'render-report.json', {'ok': True, 'devices': devices, 'blender': bpy.app.version_string,

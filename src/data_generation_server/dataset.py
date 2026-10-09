@@ -117,6 +117,17 @@ def plan_jobs(catalog, output, seed=42, combinations=1, all_combinations=False, 
     return {'version': 1, 'root': catalog['root'], 'environment_sampling': environment_sampling if not all_combinations else 'all-combinations', 'settings': {'frames': 121, 'theta': 30, 'phi': 5, 'samples': 32, 'radius': 4.5}, 'jobs': jobs}
 
 
+def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=False):
+    plan = plan_jobs(catalog, output, seed=seed, all_combinations=True,
+                     external_scenes_only=external_scenes_only)
+    plan['jobs'] = [job for job in plan['jobs'] if job['shot'] == 'far' and job['orientation'] == 'landscape']
+    for job in plan['jobs']:
+        job['auto_place'] = bool(job['scene'].get('path'))
+    plan['settings'].update(frames=1, samples=samples, no_video=True, no_save_scene=True)
+    plan['preview'] = True
+    return plan
+
+
 def command_for(job, settings, blender, root):
     subject, scene = job['subject'], job['scene']
     command = [sys.executable, '-m', 'data_generation_server.render', '--root', root, '--blender', blender,
@@ -128,6 +139,9 @@ def command_for(job, settings, blender, root):
         '--subject-position', *map(str, scene.get('position', [0, 0, 0]))]
     for key in ('frames', 'theta', 'phi', 'samples', 'radius'):
         command.extend(['--' + key, str(settings[key])])
+    if settings.get('no_video'): command.append('--no-video')
+    if settings.get('no_save_scene'): command.append('--no-save-scene')
+    if job.get('auto_place'): command.append('--auto-place')
     if scene.get('path'): command.extend(['--scene', scene['path']])
     else: command.extend(['--environment', scene['environment'], '--scene-preset', str(scene['preset'])])
     return command
@@ -136,10 +150,13 @@ def command_for(job, settings, blender, root):
 def job_complete(job, settings):
     output = Path(job['output'])
     success, config = output / 'SUCCESS.json', output / 'render-config.json'
-    if not success.is_file() or not config.is_file() or not (output / 'video.mp4').is_file(): return False
+    if not success.is_file() or not config.is_file(): return False
+    if settings.get('no_video'):
+        if not all((output / folder / filename).is_file() for folder, filename in [('rgb', 'rgb_0001.png'), ('mask', 'mask_0001.png'), ('depth', 'depth_0001.exr')]): return False
+    elif not (output / 'video.mp4').is_file(): return False
     try:
         done, cfg = json.loads(success.read_text()), json.loads(config.read_text())
-        return (done.get('video_encoded') and done.get('frames') == settings['frames']
+        return (bool(done.get('video_encoded')) == (not settings.get('no_video', False)) and done.get('frames') == settings['frames']
                 and all(cfg.get(key) == value for key, value in settings.items())
                 and cfg.get('model') == job['subject']['path'] and cfg.get('hdri') == job['background']['path']
                 and cfg.get('shot') == job['shot'] and cfg.get('selected_orientation') == job['orientation']
@@ -150,6 +167,7 @@ def job_complete(job, settings):
                 and cfg.get('seed') == job['seed']
                 and cfg.get('scene') == job['scene'].get('path')
                 and cfg.get('scene_preset') == job['scene'].get('preset', 0)
+                and cfg.get('auto_place', False) == job.get('auto_place', False)
                 and cfg.get('subject_position') == job['scene'].get('position', [0, 0, 0]))
     except (ValueError, OSError): return False
 
@@ -224,6 +242,13 @@ def main(argv=None):
     plan.add_argument('--environment-sampling', choices=['per-video', 'per-combination'], default='per-video')
     plan.add_argument('--external-scenes-only', action='store_true')
     plan.add_argument('--approved-only', action='store_true')
+    preview = sub.add_parser('preview')
+    preview.add_argument('--catalog', type=Path, required=True)
+    preview.add_argument('--output', type=Path, required=True, help='Preview plan JSON')
+    preview.add_argument('--render-root', type=Path, required=True)
+    preview.add_argument('--samples', type=int, default=16)
+    preview.add_argument('--seed', type=int, default=42)
+    preview.add_argument('--external-scenes-only', action='store_true')
     run = sub.add_parser('run')
     run.add_argument('--plan', type=Path, required=True)
     run.add_argument('--blender', required=True)
@@ -241,6 +266,15 @@ def main(argv=None):
         print(json.dumps(report, indent=2))
         print('Review/edit:', catalog_path)
         return 0 if report['quantity_ok'] else 1
+    if args.action == 'preview':
+        if args.samples < 1: parser.error('--samples must be positive')
+        catalog = json.loads(args.catalog.read_text())
+        result = preview_jobs(catalog, args.render_root, args.seed, args.samples, args.external_scenes_only)
+        write_json(args.output, result)
+        from .preview_gallery import write_gallery
+        gallery = write_gallery(result, args.render_root)
+        print(f"Planned {len(result['jobs'])} images (all enabled subjects x scenes x backgrounds); gallery: {gallery}")
+        return 0
     if args.action == 'plan':
         catalog = json.loads(args.catalog.read_text())
         result = plan_jobs(catalog, args.render_root or Path(catalog['root']) / 'renders/batch', args.seed,

@@ -44,6 +44,27 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(config['scene'], str(scene))
             self.assertEqual(config['subject_position'], [2, 3, 4])
 
+    def test_one_frame_preview_without_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            model, scene = root / 'model.glb', root / 'scene.blend'
+            model.touch(); scene.touch()
+            output = root / 'preview'
+            def rendered(command, **kwargs):
+                for kind in ('rgb', 'mask', 'depth'):
+                    (output / kind).mkdir(exist_ok=True)
+                    suffix = 'exr' if kind == 'depth' else 'png'
+                    (output / kind / f'{kind}_0001.{suffix}').touch()
+            args = ['--model', str(model), '--scene', str(scene), '--output', str(output),
+                    '--frames', '1', '--no-video', '--no-save-scene', '--auto-place']
+            with patch('data_generation_server.render.shutil.which', return_value='/blender'), patch('data_generation_server.render.subprocess.run', side_effect=rendered) as run:
+                self.assertEqual(main(args), 0)
+                self.assertEqual(run.call_count, 1)
+            cfg = json.loads((output / 'render-config.json').read_text())
+            self.assertEqual(cfg['camera_angles'], [[-90, 12]])
+            self.assertTrue(cfg['auto_place'])
+            self.assertTrue(cfg['no_save_scene'])
+
     def test_launcher_checks_outputs_before_success(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
