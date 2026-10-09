@@ -12,6 +12,7 @@ dependencies = []
 [project.scripts]
 dgs-assets = "data_generation_server.assets:main"
 dgs-render = "data_generation_server.render:main"
+dgs-people = "data_generation_server.people:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

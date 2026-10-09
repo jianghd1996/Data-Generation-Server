@@ -284,3 +284,32 @@ dgs-render 新默认：`--trajectory figure8 --frames 121 --theta 30 --phi 5 --o
 `--trajectory orbit --frames 81 --orientation landscape` 可继续使用原来的单圈轨迹。
 自动用 ffmpeg 将完整 121 帧序列编码为单个 video.mp4（24fps 时约 5.04 秒），不单独编码拼接左右段。
 需安装 ffmpeg；--no-video 仅输出帧。当前会话无法访问服务器 GPU，本地只验证轨迹和启动逻辑。
+
+## 扫描人物样例下载
+
+```bash
+python -m pip install -e .
+# 官方免费新 Posed People 的 GLB ZIP；不要求账号
+# 下载使用已有断点续传和校验逻辑，然后安全解压、列出模型路径
+dgs-people --provider renderpeople --insecure
+```
+
+素材保存在 dataset/people/direct/renderpeople_free_posed/；ZIP、来源记录与 extracted/ 下完整目录结构一并保留。
+命令会列出支持渲染的模型路径，选择一个传给 `dgs-render --model /完整路径/model.glb`。
+官方 ZIP 可能含多个文件，请按输出路径选择模型，不假设文件名。
+现有渲染脚本支持 --model；人物不会通过 --model-id 在 models/polyhaven 下查找。
+
+Humano3D 免费产品目前需要先选择格式并领取，未发现公开 ZIP 直链。先在
+https://humano3d.com/free-sample/ 选择 Blender 或 OBJ/FBX 格式，再使用取得的文件链接或 ZIP：
+
+```bash
+dgs-people --provider humano3d --url '实际ZIP下载链接' --insecure
+# 或已在其他电脑领取并传到服务器
+dgs-people --provider humano3d --archive /absolute/path/people.zip
+```
+
+也可给 Renderpeople 指定 --url 或 --archive 选择其他官方样例/格式。
+不模拟注册、购物车或账号登录，不自动刷新领取链接。signed URL 应当保持私密；不要将其提交到 Git。
+解压拒绝越界路径、符号链接及大于 20GiB 的归档；ZIP CRC 错误会中止，不替换旧的已解压内容。
+人物可在场景内使用，但模型采用各供应商许可，不是 CC0；下载与渲染许可不等同于训练或公开数据集许可。
+此实现已检索到 Renderpeople 官方直链，但当前执行环境未实际下载该二进制 ZIP；需服务器验证。
