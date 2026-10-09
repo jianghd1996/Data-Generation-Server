@@ -172,7 +172,7 @@ def batch(args):
             print(f"FAILED {entry['id']}: {exc}")
         results.append(result)
         write_json(root / 'people-batch-report.json', {'results': results, 'archive_count': len(entries)})
-    print('Run dgs-dataset inventory, ; archive/model file counts are not unique person counts.')
+    print('Run dgs-dataset inventory; archive/model file counts are not unique person counts.')
     return int(any(result['status'] == 'failed' for result in results))
 
 

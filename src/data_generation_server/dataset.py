@@ -21,7 +21,8 @@ def inventory(root, previous=None):
     catalog = {'version': 1, 'root': str(root), 'objects': [], 'people': [], 'scenes': [], 'backgrounds': []}
     old = {category: {entry['id']: entry for entry in (previous or {}).get(category, [])} for category in catalog if category not in ('version', 'root')}
     def add(category, entry):
-        entry.update({key: value for key, value in old[category].get(entry['id'], {}).items()
+        prior = old[category].get(entry['id']) or next((item for item in old[category].values() if entry.get('path') and item.get('path') == entry['path']), {})
+        entry.update({key: value for key, value in prior.items()
                       if key in ('enabled', 'review', 'notes', 'heading', 'position', 'size', 'chest', 'knee', 'identity')})
         if category == 'scenes' and 'preset' in entry:
             entry['identity'] = 'procedural_courtyard'
@@ -52,6 +53,8 @@ def inventory(root, previous=None):
             fingerprint = digest(path, 'sha256')
             # Group common LOD/color/file-format variants conservatively, then let user review identities.
             name = re.sub(r'(?i)([_-]LOD\d+.*|[_-](1k|2k|4k|8k))$', '', path.stem)
+            if category == 'people':
+                name = re.sub(r'(?i)[_-]\d+k$', '', name)
             key = (str(path.parent), name)
             if fingerprint in seen_hashes or key in seen_names: continue
             seen_hashes.add(fingerprint); seen_names.add(key)
@@ -64,7 +67,9 @@ def inventory(root, previous=None):
     for category in old:
         discovered = {entry['id'] for entry in catalog[category]}
         for identifier, entry in old[category].items():
-            if identifier not in discovered and entry.get('path') and Path(entry['path']).is_file() and not any(item.get('path') == entry['path'] for item in catalog[category]):
+            managed_directory = root / {'objects': 'models', 'people': 'people', 'scenes': 'scenes', 'backgrounds': 'hdris'}[category]
+            external_path = Path(entry['path']).resolve() if entry.get('path') else None
+            if identifier not in discovered and external_path and not external_path.is_relative_to(managed_directory.resolve()) and external_path.is_file() and not any(item.get('path') == entry['path'] for item in catalog[category]):
                 catalog[category].append(entry)
     return catalog
 

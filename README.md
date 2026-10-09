@@ -533,3 +533,6 @@ dgs-people --provider humano3d --archive-dir /path/to/authorized-zips --root "$D
 检查 catalog 的 identity/review，确认不同人物数量。下载包数量不等于人物数量。
 
 人物包支持最多四层内嵌 ZIP 自动展开，共享 20 GiB 解压上限；重跑批量命令会复用已下载的外层 ZIP。
+
+人物扫描会合并同目录中相同名称的 OBJ/FBX 和 `_30k`、`_100k` 等网格精度版本。
+经典包的母子合体仍是一项可渲染素材；identity 需人工审核，不代表单个自然人。

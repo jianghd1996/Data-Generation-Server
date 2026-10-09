@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from data_generation_server.dataset import plan_jobs, check_catalog, command_for
+from data_generation_server.dataset import plan_jobs, check_catalog, command_for, inventory
 from data_generation_server.shots import shot_setup
 
 
@@ -24,6 +24,22 @@ class DatasetTests(unittest.TestCase):
             self.assertIn('--scene-preset', command)
             self.assertFalse(check_catalog(catalog, 11)['quantity_ok'])
             with self.assertRaises(ValueError): plan_jobs(catalog, root, approved_only=True)
+
+    def test_people_polycount_dedup_and_old_catalog_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'people/pack/extracted'
+            folder.mkdir(parents=True)
+            paths = []
+            for name in ('rp_mei_posed_001_100k.fbx', 'rp_mei_posed_001_30k.fbx', 'rp_mei_posed_001_100k.obj', 'rp_dennis_posed_004_100k.fbx'):
+                path = folder / name
+                path.write_text(name)
+                paths.append(path)
+            previous = {'people': [{'id': p.name, 'path': str(p), 'review': 'approved'} for p in paths]}
+            catalog = inventory(root, previous)
+            self.assertEqual(len(catalog['people']), 2)
+            self.assertTrue(all(x['review'] == 'approved' for x in catalog['people']))
+            self.assertEqual(len(inventory(root, catalog)['people']), 2)
 
     def test_framing_distances_and_person_targets(self):
         for width, height in ((1280, 720), (720, 1280)):
