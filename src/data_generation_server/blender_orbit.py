@@ -9,6 +9,7 @@ import random
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shots import shot_setup
+from texture_paths import TextureResolver
 import bpy
 from mathutils import Matrix, Vector
 
@@ -150,10 +151,10 @@ def main():
         obj.hide_render = obj.type in ('LIGHT', 'CAMERA')
         obj.hide_viewport = False
     missing_images = []
+    subject_textures = TextureResolver(original)
     for image in set(bpy.data.images) - before_images:
         if image.packed_file or image.source != 'FILE': continue
-        candidates = [Path(bpy.path.abspath(image.filepath)), original.parent / image.filepath.removeprefix('//'), original.parent / 'textures' / Path(image.filepath).name]
-        found = next((path for path in candidates if path.is_file()), None)
+        found = subject_textures.find(image.filepath, bpy.path.abspath(image.filepath))
         if found:
             image.filepath = str(found.resolve())
             image.reload()
@@ -213,10 +214,20 @@ def main():
         world_output = nodes.new('ShaderNodeOutputWorld')
         world.node_tree.links.new(env.outputs['Color'], background.inputs['Color'])
         world.node_tree.links.new(background.outputs['Background'], world_output.inputs['Surface'])
-    # Validate external scene textures too, after open_mainfile resolved its relative paths.
-    scene_missing = [image.filepath for image in bpy.data.images
-                     if image.source == 'FILE' and not image.packed_file
-                     and not Path(bpy.path.abspath(image.filepath)).is_file()]
+    # Relink external scene images after ZIP extraction, before validating them.
+    scene_missing = []
+    scene_textures = TextureResolver(cfg['scene']) if cfg.get('scene') else None
+    for image in bpy.data.images:
+        if image.source != 'FILE' or image.packed_file: continue
+        resolved = bpy.path.abspath(image.filepath)
+        if Path(resolved).is_file(): continue
+        found = scene_textures.find(image.filepath, resolved) if scene_textures else None
+        if found:
+            print(f'[texture] {image.filepath} -> {found}', flush=True)
+            image.filepath = str(found)
+            image.reload()
+        else:
+            scene_missing.append(image.filepath)
     if scene_missing:
         save_json(output / 'render-report.json', {'ok': False, 'missing_textures': scene_missing})
         raise RuntimeError(f'Missing scene textures: {scene_missing}')
