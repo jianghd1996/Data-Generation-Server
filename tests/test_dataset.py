@@ -63,3 +63,24 @@ class MultiGpuTests(unittest.TestCase):
             self.assertEqual(len(seen), 8)
             self.assertEqual({gpu for gpu, _ in seen}, {'0', '1', '2', '3'})
             self.assertEqual(len({identity for _, identity in seen}), 8)
+
+
+class SamplingTests(unittest.TestCase):
+    def test_independent_video_environment_and_determinism(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / 'object.blend'; model.touch()
+            skies = []
+            for i in range(4):
+                path = root / f'sky{i}.hdr'; path.touch()
+                skies.append({'id': f'sky{i}', 'path': str(path)})
+            catalog = {'root': str(root), 'objects': [{'id': 'object', 'path': str(model)}], 'people': [],
+                       'scenes': [{'id': f'scene{i}', 'environment': 'courtyard', 'preset': i} for i in range(4)], 'backgrounds': skies}
+            a = plan_jobs(catalog, root / 'output', combinations=3)
+            self.assertEqual(a, plan_jobs(catalog, root / 'output', combinations=3))
+            self.assertEqual(len(a['jobs']), 18)
+            self.assertEqual(len({j['output'] for j in a['jobs']}), 18)
+            self.assertGreater(len({(j['scene']['id'], j['background']['id']) for j in a['jobs'][:6]}), 1)
+            paired = plan_jobs(catalog, root / 'paired', environment_sampling='per-combination')
+            self.assertEqual(len({(j['scene']['id'], j['background']['id']) for j in paired['jobs']}), 1)
+            with self.assertRaises(ValueError): plan_jobs(catalog, root, external_scenes_only=True)

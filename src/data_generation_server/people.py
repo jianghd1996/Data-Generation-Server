@@ -12,17 +12,17 @@ from .assets import DEFAULT_ROOT, main as assets_main, digest, safe_path, write_
 RENDERPEOPLE = 'https://renderpeople.com/sample/free/rp_posed_00178_29_GLB.zip'
 
 
-def unpack(archive, folder):
+def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 ** 3):
     folder.parent.mkdir(parents=True, exist_ok=True)
-    if folder.exists() and not (folder / 'people-index.json').exists():
+    if folder.exists() and not (folder / index_name).exists():
         raise ValueError('Refusing to replace extraction directory without pipeline index')
     with tempfile.TemporaryDirectory(prefix='people-unpack-', dir=folder.parent) as temporary:
         staging = Path(temporary) / 'content'
         staging.mkdir()
         with zipfile.ZipFile(archive) as zipped:
             entries = zipped.infolist()
-            if sum(item.file_size for item in entries) > 20 * 1024 ** 3:
-                raise ValueError('Archive exceeds 20 GiB extraction limit')
+            if sum(item.file_size for item in entries) > max_bytes:
+                raise ValueError('Archive exceeds configured extraction limit')
             paths = []
             for item in entries:
                 target = safe_path(staging, item.filename.rstrip('/'))
@@ -42,7 +42,7 @@ def unpack(archive, folder):
                   if path.suffix.lower() in ('.glb', '.gltf', '.blend', '.fbx', '.obj')]
         if not models:
             raise ValueError('No Blender-supported models in archive; choose GLB/Blender/FBX/OBJ format')
-        write_json(staging / 'people-index.json', {'archive_sha256': digest(archive, 'sha256'), 'models': models})
+        write_json(staging / index_name, {'archive_sha256': digest(archive, 'sha256'), 'models': models})
         if folder.exists(): shutil.rmtree(folder)
         staging.replace(folder)
     return models

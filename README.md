@@ -43,11 +43,12 @@ nvidia-smi
 从 [Blender 官方下载目录](https://download.blender.org/release/Blender4.5/)取得与你系统匹配的 Linux 安装包，解压即可使用，无需把 Blender 装进 Python 环境。
 Blender 不在 PATH 中时，为渲染命令传入 `--blender /absolute/path/to/blender`。
 
-项目提供四个命令：
+项目提供五个命令：
 
 | 命令 | 用途 |
 | --- | --- |
 | `dgs-assets` | 查找素材、生成下载清单、下载和离线校验 |
+| `dgs-scenes` | 下载并解压官方完整场景包 |
 | `dgs-people` | 下载/导入人物 ZIP，安全解压并列出模型路径 |
 | `dgs-render` | 单样例场景组合、轨迹渲染、标注与视频输出 |
 | `dgs-dataset` | 素材目录审核、数量检查、生成计划、多卡执行 |
@@ -227,7 +228,7 @@ dgs-assets verify --root "$DGS_ROOT"
 | `--scene /path/environment.blend` | 读取完整活动场景，保留环境几何、材质、灯光和world；不添加地面 |
 
 **HDRI不是三维场景**：它提供光照和远景，没有附近树木、建筑的几何视差。
-当前12个 `--scene-preset` 庭院选项是同一种程序化环境的布局/色调变体，不是12个独立高质量场景资产。
+当前12个 `--scene-preset` 庭院选项是同一种程序化环境的布局/色调变体，不是12个独立高质量场景资产。数量检查将它们归为一个identity。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 dgs-render \
@@ -343,7 +344,7 @@ dgs-dataset plan --catalog "$DGS_ROOT/catalog.json" \
   --combinations-per-subject 1 --seed 42
 ```
 
-每个主体抽取1个不重复的场景×HDRI组合，每组合近中远×横竖屏，共6条视频。
+每个主体生成近中远×横竖屏共6条视频；默认每条独立抽取场景与HDRI，方向之间也可不同。
 `--combinations-per-subject 3`可扩展为每个主体18条；正式数据建议加 `--approved-only`。
 默认允许待审核候选，方便先生成检查样例。
 
@@ -464,3 +465,39 @@ HTTP、Blender启动及GPU分配测试使用模拟，不代替真实服务器渲
 - [Renderpeople](https://renderpeople.com/free-3d-people/)与[Humano3D](https://humano3d.com/free-sample/)使用各自供应商许可，不是CC0。
 - 本项目下载并记录来源，不自动判断训练、公开数据集或素材再分发权限。免费渲染素材不等于允许任意训练用途。
 - 仓库不附带第三方素材；发布生成数据前请核对相应许可。
+
+## 下载完整场景并重新随机环境
+
+```bash
+# 六个官方完整场景包（可能占用较大磁盘；完整包默认解压上限100GiB）
+dgs-scenes --root "$DGS_ROOT" --insecure
+# 或只下载部分
+dgs-scenes --root "$DGS_ROOT" --ids hidden_alley pine_forest the_shed --insecure
+
+dgs-dataset inventory --root "$DGS_ROOT"
+```
+
+来源：https://polyhaven.com/collections ，包含 moon/namaqualand/verdant_trail/hidden_alley/pine_forest/the_shed。
+支持断点下载；成功解压可复用。失败报告在scene-download-report.json。
+每包保存 scene-registration.json，列出候选blend；默认选路径最浅的blend作为主场景。
+请检查候选，必要时修改 catalog.scenes 的path和position。默认为世界原点，不能保证是空地。
+包中的素材blend不会全部当作独立场景计数。归档与全部贴图一起保留，可能需要数十GiB磁盘。
+脚本只验证下载/解压，不保证每个场景适配Blender4.x或具备完整第三方插件依赖。
+
+```bash
+# 仅采用下载/手动导入的真实场景，不再抽courtyard变体；新目录避免覆盖旧实验
+dgs-dataset plan --catalog "$DGS_ROOT/catalog.json" \
+  --output "$DGS_ROOT/render-plan-scenes-v2.json" \
+  --render-root "$DGS_ROOT/renders/scenes-v2" \
+  --combinations-per-subject 1 --environment-sampling per-video \
+  --external-scenes-only --seed 20261009
+
+dgs-dataset run --plan "$DGS_ROOT/render-plan-scenes-v2.json" \
+  --blender "$DGS_BLENDER" --gpus 0,1,2,3 --limit 6
+```
+
+默认per-video为每条独立抽取环境；可能随机重复，不承诺每六条互不相同。
+`--environment-sampling per-combination`恢复旧模式，六条共用一个环境。
+`--all-combinations`仍按全部组合枚举，不启用随机替换。
+相机轨迹、近中远计算、主体参数和横竖屏不变；需要重新plan才能改变旧计划里的固定环境。
+检查第一批视频后，去掉limit运行全部。落脚点在catalog中修改后需重新生成计划。

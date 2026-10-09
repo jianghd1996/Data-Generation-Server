@@ -23,6 +23,8 @@ def inventory(root, previous=None):
     def add(category, entry):
         entry.update({key: value for key, value in old[category].get(entry['id'], {}).items()
                       if key in ('enabled', 'review', 'notes', 'heading', 'position', 'size', 'chest', 'knee', 'identity')})
+        if category == 'scenes' and 'preset' in entry:
+            entry['identity'] = 'procedural_courtyard'
         entry.setdefault('enabled', True)
         entry.setdefault('review', 'pending')
         catalog[category].append(entry)
@@ -33,10 +35,20 @@ def inventory(root, previous=None):
         models = sorted((p for p in paths if p.suffix.lower() in EXTENSIONS), key=lambda p: EXTENSIONS[p.suffix.lower()])
         if models:
             add('objects', {'id': data['asset']['id'], 'path': str(models[0]), 'sha256': digest(models[0], 'sha256')})
+    registered_scene_paths = set()
+    for registration in sorted((root / 'scenes').rglob('scene-registration.json')):
+        entry = json.loads(registration.read_text())
+        if Path(entry['path']).is_file():
+            add('scenes', entry)
+            registered_scene_paths.add(str(Path(entry['path']).resolve()))
     for category, directory, suffixes in [('people', 'people', set(EXTENSIONS)), ('scenes', 'scenes', {'.blend'}), ('backgrounds', 'hdris', {'.hdr', '.exr'})]:
         seen_hashes, seen_names = set(), set()
         files = sorted((p for p in (root / directory).rglob('*') if p.suffix.lower() in suffixes), key=lambda p: (EXTENSIONS.get(p.suffix.lower(), 0), str(p)))
         for path in files:
+            if category == 'scenes':
+                if str(path.resolve()) in registered_scene_paths : continue
+                # A registered archive contributes only its selected main scene, not its asset blends.
+                if any(parent.joinpath('scene-registration.json').exists() for parent in path.parents if root in parent.parents): continue
             fingerprint = digest(path, 'sha256')
             # Group common LOD/color/file-format variants conservatively, then let user review identities.
             name = re.sub(r'(?i)([_-]LOD\d+.*|[_-](1k|2k|4k|8k))$', '', path.stem)
@@ -47,12 +59,12 @@ def inventory(root, previous=None):
             add(category, {'id': identifier, 'path': str(path.resolve()), 'sha256': fingerprint})
     for index in range(12):
         add('scenes', {'id': f'courtyard_{index:02d}', 'environment': 'courtyard', 'preset': index,
-                       'origin': 'procedural courtyard layout/palette variant; not a downloaded scene'})
+                       'identity': 'procedural_courtyard', 'origin': 'procedural courtyard layout/palette variant; not a downloaded scene'})
     # Retain manually registered external assets outside the default directories.
     for category in old:
         discovered = {entry['id'] for entry in catalog[category]}
         for identifier, entry in old[category].items():
-            if identifier not in discovered and entry.get('path') and Path(entry['path']).is_file():
+            if identifier not in discovered and entry.get('path') and Path(entry['path']).is_file() and not any(item.get('path') == entry['path'] for item in catalog[category]):
                 catalog[category].append(entry)
     return catalog
 
@@ -70,13 +82,14 @@ def check_catalog(catalog, minimum):
             'note': 'Counts are candidate assets, not certified unique people or visual quality. Scene presets are variants of one procedural courtyard. Review catalog, disable duplicates, and approve checked entries.'}
 
 
-def plan_jobs(catalog, output, seed=42, combinations=1, all_combinations=False, approved_only=False):
+def plan_jobs(catalog, output, seed=42, combinations=1, all_combinations=False, approved_only=False, environment_sampling='per-video', external_scenes_only=False):
     def usable(category):
         return [entry for entry in catalog[category] if entry.get('enabled', True)
                 and (not approved_only or entry.get('review') == 'approved')
                 and (not entry.get('path') or Path(entry['path']).is_file())]
     subjects = [('object', item) for item in usable('objects')] + [('person', item) for item in usable('people')]
     scenes, backgrounds = usable('scenes'), usable('backgrounds')
+    if external_scenes_only: scenes = [entry for entry in scenes if entry.get('path')]
     if not subjects or not scenes or not backgrounds:
         raise ValueError('Need at least one enabled subject, scene, and background')
     if combinations < 1: raise ValueError('combinations must be >= 1')
@@ -87,11 +100,13 @@ def plan_jobs(catalog, output, seed=42, combinations=1, all_combinations=False, 
         for index in indices:
             scene, background = scenes[index // len(backgrounds)], backgrounds[index % len(backgrounds)]
             for shot, orientation in itertools.product(('near', 'medium', 'far'), ('landscape', 'portrait')):
+                if environment_sampling == 'per-video' and not all_combinations:
+                    scene, background = rng.choice(scenes), rng.choice(backgrounds)
                 identity = f"{kind}_{subject['id']}__{scene['id']}__{background['id']}__{shot}__{orientation}"
-                job_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
+                job_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity) + f'__sample{index:04d}'
                 jobs.append({'id': job_id, 'kind': kind, 'subject': subject, 'scene': scene, 'background': background,
                              'shot': shot, 'orientation': orientation, 'seed': seed, 'output': str((output / job_id).resolve())})
-    return {'version': 1, 'root': catalog['root'], 'settings': {'frames': 121, 'theta': 30, 'phi': 5, 'samples': 32, 'radius': 4.5}, 'jobs': jobs}
+    return {'version': 1, 'root': catalog['root'], 'environment_sampling': environment_sampling if not all_combinations else 'all-combinations', 'settings': {'frames': 121, 'theta': 30, 'phi': 5, 'samples': 32, 'radius': 4.5}, 'jobs': jobs}
 
 
 def command_for(job, settings, blender, root):
@@ -198,6 +213,8 @@ def main(argv=None):
     plan.add_argument('--seed', type=int, default=42)
     plan.add_argument('--combinations-per-subject', type=int, default=1)
     plan.add_argument('--all-combinations', action='store_true')
+    plan.add_argument('--environment-sampling', choices=['per-video', 'per-combination'], default='per-video')
+    plan.add_argument('--external-scenes-only', action='store_true')
     plan.add_argument('--approved-only', action='store_true')
     run = sub.add_parser('run')
     run.add_argument('--plan', type=Path, required=True)
@@ -219,9 +236,9 @@ def main(argv=None):
     if args.action == 'plan':
         catalog = json.loads(args.catalog.read_text())
         result = plan_jobs(catalog, args.render_root or Path(catalog['root']) / 'renders/batch', args.seed,
-                           args.combinations_per_subject, args.all_combinations, args.approved_only)
+                           args.combinations_per_subject, args.all_combinations, args.approved_only, args.environment_sampling, args.external_scenes_only)
         write_json(args.output, result)
-        print(f"Planned {len(result['jobs'])} videos; six per subject/scene/background combination")
+        print(f"Planned {len(result['jobs'])} videos; near/medium/far x landscape/portrait; environment sampling: {result['environment_sampling']}")
         return 0
     if args.limit < 0: parser.error('--limit must be >= 0')
     plan = json.loads(args.plan.read_text())
