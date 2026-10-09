@@ -20,6 +20,22 @@ class TextureTests(unittest.TestCase):
             self.assertEqual(resolver.find(r'C:\old\textures\Water_Bump.JPG'), texture)
             self.assertIsNone(resolver.find('//textures/missing.jpg'))
 
+    def test_pavilion_water_substitution_is_scoped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            texture = root / 'water-raindrop.jpg'
+            texture.touch()
+            pavilion = root / 'pavillon_barcelone_v1.2.blend'
+            pavilion.touch()
+            self.assertEqual(TextureResolver(pavilion).find('//textures/water bump.jpg'), texture)
+            other = root / 'other.blend'
+            other.touch()
+            self.assertIsNone(TextureResolver(other).find('//textures/water bump.jpg'))
+            original = root / 'textures/water bump.jpg'
+            original.parent.mkdir()
+            original.touch()
+            self.assertEqual(TextureResolver(pavilion).find('//textures/water bump.jpg'), original)
+
     def test_ambiguous_names_not_chosen(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

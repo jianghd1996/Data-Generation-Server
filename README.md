@@ -574,3 +574,8 @@ dgs-dataset inventory --root "$DGS_ROOT" --minimum 11
 ```bash
 dgs-scenes --provider polyhaven --max-download-mib 300 --root "$DGS_ROOT" --insecure
 ```
+
+
+Barcelona Pavilion 原包可能缺少 `.blend` 引用的 `water bump.jpg`，但包含 `water-raindrop.jpg`。
+仅对 `pavillon_barcelone_v1.2.blend`，下载包内缺失的该贴图会替换为现有水波图，并打印 `[texture]`。
+这是一项水面凹凸细节替代，不保证与原始图相同；其他场景不会套用这个名称替代。

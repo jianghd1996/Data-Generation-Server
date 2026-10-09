@@ -33,7 +33,12 @@ class TextureResolver:
             for path in sorted(self.root.rglob('*')):
                 if path.is_file():
                     self.index.setdefault(texture_key(path.name), []).append(path)
-        matches = self.index.get(texture_key(filename), [])
+        lookup = texture_key(filename)
+        # This official legacy demo omits water bump.jpg, but includes a water ripple map.
+        # Scoped substitution repairs its bump input; it is not an exact original-image match.
+        if self.asset.name.casefold() == 'pavillon_barcelone_v1.2.blend' and lookup == texture_key('water bump.jpg'):
+            lookup = texture_key('water-raindrop.jpg')
+        matches = self.index.get(lookup, [])
         # Prefer exact basenames; never silently choose among multiple candidates.
         exact = [path for path in matches if path.name.casefold() == filename.casefold()]
         matches = exact or matches
