@@ -1,413 +1,466 @@
 # Data Generation Server
 
-用于服务器端的「素材下载 → 场景组合 → 相机轨迹 → 渲染 → 数据集」管线。
-当前实现素材下载与校验，以及单主体的相机环绕渲染。完整三维场景组合和批量渲染尚未实现。
+在带 NVIDIA GPU 的 Linux 服务器上，把静止物体或人物放入三维环境，沿可控相机轨迹渲染视频与几何标注。
 
-## 安装与开始
+项目使用 **Blender Cycles + Python**，涵盖素材下载、完整性校验、素材审核、场景组合、球面轨迹、视频编码和多 GPU 批量调度。适合相机控制、视角扩充、三维重建及合成数据实验。
 
-Python >= 3.10，下载阶段无需 GPU、Blender 或第三方运行时依赖。
+> 最小使用流程：下载一个主体和一个 HDRI → 渲染少量帧确认素材 → 检查素材目录 → 生成组合计划 → 多卡执行。
+
+## 功能与范围
+
+| 部分 | 当前支持 |
+| --- | --- |
+| 素材 | Poly Haven 模型/材质/HDRI；Renderpeople 免费静止人物；其他合法 HTTP(S) 直链或本地人物 ZIP |
+| 下载 | 并发、断点续传、大小与校验值检查、失败重试、完整文件跳过、进度输出 |
+| 环境 | 地面加 HDRI、程序化庭院、完整外部 `.blend` 场景 |
+| 主体 | `.blend`、`.glb/.gltf`、`.fbx`、`.obj`；自动缩放、居中、贴地与朝向调整 |
+| 相机 | 球面左右镜像双环轨迹、普通环绕；始终朝向球心 |
+| 景别 | 物体近/中/远；人物胸部—头部、膝盖—头部、全身 |
+| 输出 | RGB、主体 mask、深度 EXR、相机内外参、视频、首帧、配置与报告 |
+| 批量 | 主体×场景×HDRI组合；每组合近中远各一横一竖；固定随机种子 |
+| 调度 | 指定多张 GPU，每卡一个任务；成功任务跳过，失败任务可重新渲染 |
+
+场景、模型与人物保持静止，仅相机运动。暂不支持自动寻找落脚点、碰撞避让、骨骼语义检测、动态人物、逐帧渲染恢复或每卡多个并行任务。
+
+## 1. 环境与安装
+
+- Linux；项目 Python **3.10+**。
+- Blender **4.2–4.5**，推荐 4.5 LTS。当前合成器代码不支持 Blender 5。
+- NVIDIA GPU 与兼容驱动。默认 Cycles CUDA，也可指定 OPTIX 或显式 CPU。
+- ffmpeg：用于 H.264 MP4 编码和首帧 JPEG；仅渲染图片可用 `--no-video`。
+- 项目 Python 运行时只使用标准库，无需安装 torch 或 diffusers。
 
 ```bash
 git clone https://github.com/jianghd1996/Data-Generation-Server.git
 cd Data-Generation-Server
 python -m pip install -e .
 
-# 查询可用素材；返回 ID、名称及元数据
-dgs-assets search --type models --query statue --limit 10
-dgs-assets search --type hdris --query outdoor --limit 10 --output catalog.json
+blender --version
+ffmpeg -version
+nvidia-smi
+```
 
-# 查询某个素材实际可用的格式和分辨率
+从 [Blender 官方下载目录](https://download.blender.org/release/Blender4.5/)取得与你系统匹配的 Linux 安装包，解压即可使用，无需把 Blender 装进 Python 环境。
+Blender 不在 PATH 中时，为渲染命令传入 `--blender /absolute/path/to/blender`。
+
+项目提供四个命令：
+
+| 命令 | 用途 |
+| --- | --- |
+| `dgs-assets` | 查找素材、生成下载清单、下载和离线校验 |
+| `dgs-people` | 下载/导入人物 ZIP，安全解压并列出模型路径 |
+| `dgs-render` | 单样例场景组合、轨迹渲染、标注与视频输出 |
+| `dgs-dataset` | 素材目录审核、数量检查、生成计划、多卡执行 |
+
+### 路径约定
+
+以下教程使用可移植的项目内数据目录：
+
+```bash
+export DGS_ROOT="$PWD/dataset"
+export DGS_BLENDER="/absolute/path/to/blender"
+```
+
+**请将 `DGS_BLENDER` 改成实际可执行文件。**
+`DGS_ROOT`/`DGS_BLENDER` 用于本 README 和辅助脚本；CLI 需要显式传 `--root`/`--blender`。
+未指定 `--root` 时，代码默认使用原实验服务器路径：
+
+```text
+/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset
+```
+
+`--root` 控制素材读取/下载位置，`--output` 控制渲染结果位置，两者可以不同。素材和生成结果不提交到 Git。
+
+## 2. 最小样例：下载并渲染
+
+### 2.1 下载物体与 HDRI
+
+仓库的 `configs/assets.example.json` 包含一个马雕像及一个 HDRI。
+
+```bash
+dgs-assets download --manifest configs/assets.example.json --root "$DGS_ROOT" --workers 2
+```
+
+素材上游格式变化时先用 `dgs-assets files horse_statue_01` 查询实际可用选项。
+下载成功会显示 `OK <asset-id>`，模型引用的贴图会一起下载并保持相对目录结构。
+
+### 2.2 先检查三帧
+
+```bash
+CUDA_VISIBLE_DEVICES=0 dgs-render \
+  --root "$DGS_ROOT" --blender "$DGS_BLENDER" \
+  --model-id horse_statue_01 --hdri-id abandoned_factory_canteen_01 \
+  --environment courtyard --trajectory orbit --sweep 60 \
+  --frames 3 --width 640 --height 360 --orientation landscape \
+  --samples 16 --no-video \
+  --output "$DGS_ROOT/renders/horse_smoke"
+```
+
+查看 `horse_smoke/rgb/`：确认贴图、主体朝向、位置、构图和光照。输出目录非空时拒绝覆盖，换目录或显式使用 `--overwrite`。
+
+### 2.3 生成121帧视频
+
+```bash
+CUDA_VISIBLE_DEVICES=0 dgs-render \
+  --root "$DGS_ROOT" --blender "$DGS_BLENDER" \
+  --model-id horse_statue_01 --hdri-id abandoned_factory_canteen_01 \
+  --environment courtyard \
+  --trajectory figure8 --theta 30 --phi 5 --frames 121 \
+  --width 1280 --height 720 --orientation random --seed 42 \
+  --samples 32 \
+  --output "$DGS_ROOT/renders/horse_figure8"
+```
+
+视频为 `horse_figure8/video.mp4`。24 fps 时121帧约5.04秒。
+默认随机选1280×720或720×1280，seed相同会复现方向；`--orientation landscape/portrait` 可固定方向。
+
+已有衣柜与 HDRI 的用户，也可运行 `bash scripts/test_figure8.sh`。该脚本使用 `chinese_cabinet`、自动查找已下载 HDRI，并读取 `DGS_ROOT`/`DGS_BLENDER`；可通过 `DGS_GPU`、`DGS_THETA`、`DGS_PHI`、`DGS_SEED`、`DGS_ORIENTATION`、`DGS_OUTPUT` 覆盖参数。
+
+## 3. 素材下载与扩充
+
+### Poly Haven
+
+Powered by Poly Haven — [polyhaven.com](https://polyhaven.com/)
+
+```bash
+# ID和元数据；query是子串匹配，不是语义检索
+dgs-assets search --type models --query statue --limit 10
+dgs-assets search --type hdris --query outdoor --limit 10
+
+# 查格式、分辨率和依赖
 dgs-assets files horse_statue_01
 
-# 只解析下载计划，不写入文件（仍访问素材 API）
-dgs-assets download --manifest configs/assets.example.json --dry-run
+# 固定随机种子抽样，保存一次清单后重复使用
+dgs-assets manifest --type models --limit 24 --seed 42 --resolution 2k \
+  --output configs/models.batch.json
 
-# 下载；同一命令可以重新运行，自动检查并跳过完整文件
-dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset --workers 2
+dgs-assets download --manifest configs/models.batch.json --root "$DGS_ROOT" --dry-run
+dgs-assets download --manifest configs/models.batch.json --root "$DGS_ROOT" --workers 4
 ```
 
-示例 ID 来自官方 API 文档，可能随上游调整；若格式不可用，请用 `files` 查看后修改配置。
-默认 2k 贴图、两个并发素材；每个素材内部按顺序下载。不要同时运行多个下载进程写入同一 root。
-下载支持系统 HTTP_PROXY/HTTPS_PROXY 环境变量，网络超时 60 秒，失败最多尝试四次。
+`--type` 支持 `models`、`hdris`、`textures`。HDRI默认HDR，模型/材质默认Blender格式；可用 `--format` 指定实际支持的格式。
+清单生成不保证每个素材都提供选定格式，`--dry-run` 会访问API解析下载计划，但不写素材文件。上游目录变化时抽样可能变化，因此保留原清单。
 
-## 素材清单
+辅助扩充脚本：
 
-JSON 顶层包含 `version: 1` 与 `assets` 数组。
-
-Poly Haven：
-
-```json
-{"provider":"polyhaven","id":"horse_statue_01","kind":"models","resolution":"2k","format":"blend"}
+```bash
+bash scripts/expand_assets.sh
 ```
 
-支持 models、textures、hdris；HDRI 使用 hdr/exr，模型使用 API 实际提供的 blend/gltf/fbx 等格式。
-模型/材质主文件的 `include` 依赖会一并下载，保持官方相对路径。
-不会静默降低分辨率或替换格式；不存在的组合明确报错。
-HDRI 不是完整三维场景，不能替代有近景视差的几何环境。
+它为物体和HDRI各准备24个候选，并下载当前Renderpeople免费样例，最后生成库存报告。已有清单保留供重试。
+**该脚本默认加 `--insecure`，是原代理环境的兼容设置**；网络证书正常的用户应移除它，或改为自定义CA。
+不要同时启动多个下载进程写入同一数据根目录。下载和GPU渲染可在不同终端同时进行。
 
-人物、完整场景或其他来源的合法下载直链：
+### 人物
+
+```bash
+# 已确认的官方免费人物GLB ZIP；下载后自动解压
+dgs-people --provider renderpeople --root "$DGS_ROOT"
+```
+
+命令列出的模型路径可以直接传给 `dgs-render --model`。默认文件位于 `people/direct/renderpeople_free_posed/extracted/`。
+
+[Humano3D 免费样例](https://humano3d.com/free-sample/)目前需要选择格式并领取，未接入购物车或登录流程。
+领取Blender、GLB或OBJ/FBX包后：
+
+```bash
+dgs-people --provider humano3d --archive /absolute/path/sample.zip \
+  --id humano_sample02 --root "$DGS_ROOT"
+
+# 也支持已领取的真实ZIP下载链接
+dgs-people --provider humano3d --url '实际ZIP文件链接' \
+  --id humano_sample03 --root "$DGS_ROOT"
+```
+
+**多个素材包请使用不同 `--id`**，避免替换之前解压的目录。默认Renderpeople入口不表示已提供十余个独立人物。
+ZIP解压保留完整目录结构，检查CRC，拒绝路径越界、符号链接及超过20GiB的归档。普通 `dgs-assets` 下载ZIP时不会自动解压。
+
+### 通用直链清单
 
 ```json
 {
   "version": 1,
   "assets": [{
     "provider": "direct",
-    "id": "standing_person_001",
-    "kind": "people",
+    "id": "scene_room01",
+    "kind": "scenes",
     "source_url": "https://example.com/asset-page",
-    "license": "填写该素材的实际许可名称或链接",
+    "license": "填写该素材实际许可名称或链接",
     "files": [{
-      "url": "https://example.com/person.glb",
-      "path": "person.glb"
+      "url": "https://example.com/environment.blend",
+      "path": "environment.blend"
+    }, {
+      "url": "https://example.com/color.png",
+      "path": "textures/color.png"
     }]
   }]
 }
 ```
 
-以上 example.com 是格式示意，需替换为真实 URL。可选文件字段：`size`（字节）、`sha256`、`md5`。
-推荐 GLB；FBX/OBJ/GLTF 等外部贴图和材质文件须逐项列入 files 并保持相对路径。
-ZIP 文件只下载，不自动解压。不接入登录网站的页面爬取；Mixamo/Fab/Sketchfab 等需先取得允许下载的链接。
-短期签名链接过期后更新清单即可；目前不支持自定义鉴权头或自动刷新令牌。
+`example.com`仅为格式示意，需换成真实文件直链。每个文件可额外提供 `size`（字节）、`sha256`、`md5`。
+`kind` 支持 `models/people/scenes/hdris/textures`，`direct` 素材必须记录来源和许可。ZIP之外的外部依赖须逐项列入清单。
+不支持登录页面下载、自定义鉴权头或自动刷新签名链接。私密下载链接不要提交到Git。
 
-## 输出及可恢复性
+### 续传、重试与校验
 
-```text
-dataset/
-  models/polyhaven/horse_statue_01/
-    horse_statue_01_2k.blend
-    textures/...
-    asset.json
-  hdris/polyhaven/abandoned_factory_canteen_01/...
-  people/direct/standing_person_001/...
-  download-report.json
+重新执行**同一下载清单**即可恢复：
+
+- 完整且校验通过的文件显示 `[skip]`；损坏文件重新下载。
+- 未完成文件保存为 `.part`。服务端有ETag/Last-Modified且支持Range时尝试续传。
+- 服务端不支持续传或版本变化时重新下载；HTTP416会重启该文件下载。
+- 网络超时60秒，每个文件最多尝试4次。最终失败不阻断其他素材，整个命令退出码为1。
+- 正式文件在传输和校验后原子替换。进度100%只表示传输结束，`OK`表示整个素材处理成功。
+
+```bash
+dgs-assets verify --root "$DGS_ROOT"
 ```
 
-`asset.json` 记录原始配置、来源、许可、官方元数据、文件相对路径和 SHA256。
-`download-report.json` 为本次运行成功/失败的汇总，不是累积索引；每个素材的 asset.json 可供后续渲染读取。
-文件先写入 `.part`，校验完成再原子替换正式文件。断点续传以 ETag/Last-Modified 和 If-Range 绑定服务端版本；
-服务端忽略 Range 时重新下载。已下载文件通过本地 SHA256 receipt 检查，损坏时重新下载。
-上游有 MD5/大小时额外核验；直链没有上游校验值时，本地 SHA256 用于后续完整性检查，不代表上游真实性认证。
-单个素材失败不阻断其他素材，最终退出码为 1；重新运行清单即可重试。
-成功素材的 asset.json 仅在全部依赖下载完成后生成。
+`verification-report.json` 检查已有 `asset.json` 的文件、大小、校验值和残留 `.part`。它不验证Blender加载或视觉质量，也不证明清单中未出现的素材已经下载。
+`download-report.json`只记录最近一次下载调用，不是所有调用的累计历史。来源、许可和SHA256另存于每个素材的 `asset.json`。
 
-## 测试
+## 4. 三维环境与主体放置
+
+| 选项 | 行为 |
+| --- | --- |
+| `--environment studio` | 大面积纯色地面加HDRI，适合模型加载检查；地面可能遮住HDRI下半部分 |
+| `--environment courtyard` | 程序化铺地、围墙、立柱和花坛；HDRI用于天空和照明 |
+| `--scene /path/environment.blend` | 读取完整活动场景，保留环境几何、材质、灯光和world；不添加地面 |
+
+**HDRI不是三维场景**：它提供光照和远景，没有附近树木、建筑的几何视差。
+当前12个 `--scene-preset` 庭院选项是同一种程序化环境的布局/色调变体，不是12个独立高质量场景资产。
+
+```bash
+CUDA_VISIBLE_DEVICES=0 dgs-render \
+  --root "$DGS_ROOT" --blender "$DGS_BLENDER" \
+  --model /absolute/path/person.glb \
+  --scene /absolute/path/environment.blend \
+  --subject-position 0 0 0 --subject-heading 0 \
+  --subject-kind person --shot far \
+  --frames 121 --output "$DGS_ROOT/renders/person_in_scene"
+```
+
+外部场景无需另配HDRI；要覆盖原world，用 `--hdri /absolute/path/light.hdr`，此模式不使用 `--hdri-id`。
+原场景文件不修改，只在输出目录保存组合后的 `scene.blend`。
+原相机、合成器、分辨率和色彩管理会由本管线替换；对象动画清除，但特殊驱动、节点动画和物理模拟应先处理成静态素材。
+贴图应打包或保持正确相对路径。特殊插件、模拟缓存和外部Geometry Nodes依赖需要自行准备。
+
+`--subject-size`将主体最长边归一化到目标长度，默认2个场景单位；环境本身不缩放。
+`--subject-position X Y Z` 是底面/脚底中心，`--subject-heading`是绕Z轴的角度。
+不会自动识别一个复杂模型文件中的主角，导入文件中全部几何会作为主体。请先检查三帧，确认空地、模型朝向和相机路径。
+
+## 5. 球面轨迹与景别
+
+### 左右镜像双环
+
+默认 `--trajectory figure8 --frames 121 --theta 30 --phi 5`。
+相对于初始方位角/仰角，各节点为：
+
+| 环 | 节点偏移 `(方位角, 仰角)` |
+| --- | --- |
+| 右 | `(0,0) → (0,+φ) → (+θ,+φ) → (+θ,-φ) → (0,-φ) → (0,0)` |
+| 左 | `(0,0) → (0,+φ) → (-θ,+φ) → (-θ,-φ) → (0,-φ) → (0,0)` |
+
+这是十段指定动作形成的镜像双环，不是正弦8字曲线。121帧对应120个时间间隔，每段12个间隔；第1/61/121帧回到相同位姿。
+转角使用五次缓入缓出，平滑停顿，不是全程匀速。相机半径固定，始终朝球心，无roll。
+默认 `--start-angle -90 --elevation 12`，φ=5时实际仰角为7°–17°。模型正面需用heading或start-angle调整。
+普通环绕用 `--trajectory orbit --sweep 90`。360°环绕首尾重复视角。
+
+### 近、中、远景
+
+| 主体 | near | medium | far |
+| --- | --- | --- | --- |
+| 物体 | 完整主体，目标画面比例约85% | 约64% | 约40% |
+| 人物 | 胸部—头部 | 膝盖—头部 | 原4.5球面距离，全身中心 |
+
+单例通过 `--subject-kind object/person --shot near/medium/far` 选择。
+默认 `--shot manual` 保留固定半径和全主体中心；批量计划显式生成三档。
+人物近/中景按包围盒高度比例估计胸部0.65、膝盖0.28，将取景区域中心作为球心，再计算距离。
+可用 `--person-chest`/`--person-knee` 修正，也可在人物catalog条目中设置 `chest`/`knee`。
+抬手、坐姿、道具和特殊衣物会影响包围盒，需人工检查。画面裁切随角度可能变化；不是解剖学检测。
+物体的宽高都会约束距离。横竖屏保持短边视场角；近/中景按各自画幅重算距离。
+实际 `framing.target` 和 `effective_radius` 写入相机文件与报告。
+
+常用默认参数：
+
+| 参数 | 默认值 |
+| --- | --- |
+| 帧数 / 帧率 | 121 / 24 fps |
+| 尺寸 | 1280×720，按方向交换 |
+| 方向 / seed | random / 42 |
+| Cycles samples / device | 32 / CUDA |
+| θ / φ | 30° / 5° |
+| radius / elevation | 4.5 / 12° |
+| start-angle / focal-mm | -90° / 35mm参考焦距 |
+
+所有参数可通过 `dgs-render --help` 查询。
+
+## 6. 检查素材与生成组合计划
+
+### 库存及审核
+
+```bash
+dgs-dataset inventory --root "$DGS_ROOT" --minimum 11
+```
+
+生成 `catalog.json`、`coverage-report.json`，分别列出 objects、people、scenes、backgrounds。
+数量不足退出码为1，这表示覆盖缺口，不代表下载全部失败。
+候选计数、unique_identities、approved、procedural和external分别报告；文件存在不等于视觉合格。
+
+审核时修改 `catalog.json`：
+
+```json
+{
+  "id": "person01",
+  "path": "/absolute/path/person.glb",
+  "enabled": true,
+  "review": "approved",
+  "identity": "person01",
+  "heading": 0,
+  "size": 2,
+  "chest": 0.65,
+  "knee": 0.28,
+  "notes": "已检查朝向和近中远裁切"
+}
+```
+
+以上是 `people` 数组中的单条示意，不是完整catalog文件。
+不合适的条目设 `enabled=false`。同一人的不同格式、LOD、换色或姿态填写相同identity，避免虚增人数。
+再次inventory保留审核信息；自动去重不能代替人物身份检查。
+
+外部场景放进 `dataset/scenes/` 后重新扫描，或在 `scenes` 数组手动登记绝对路径和主体位置：
+
+```json
+{"id":"room01","path":"/absolute/path/room.blend","position":[0,0,0],"enabled":true,"review":"approved"}
+```
+
+扫描保留仍存在的手动登记外部素材。新增素材后需重新生成计划才能使用。
+
+### 固定抽样组合
+
+```bash
+dgs-dataset plan --catalog "$DGS_ROOT/catalog.json" \
+  --output "$DGS_ROOT/render-plan.json" \
+  --combinations-per-subject 1 --seed 42
+```
+
+每个主体抽取1个不重复的场景×HDRI组合，每组合近中远×横竖屏，共6条视频。
+`--combinations-per-subject 3`可扩展为每个主体18条；正式数据建议加 `--approved-only`。
+默认允许待审核候选，方便先生成检查样例。
+
+`--all-combinations`枚举全部，视频数量为：
+
+```text
+(物体数 + 人物数) × 场景数 × HDRI数 × 3景别 × 2方向
+```
+
+例如22个主体、12个场景、12个HDRI会生成19,008条视频。先确认计划规模再执行。
+计划保存绝对素材路径、组合、方向、输出目录和settings，可手工修改全局frames/theta/phi/samples/radius。
+保存不同计划文件可保留实验配置；不要依靠重新随机抽样恢复旧实验。
+
+## 7. 单卡和多卡执行
+
+先测试一个组合的六条视频：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 dgs-dataset run --plan "$DGS_ROOT/render-plan.json" \
+  --blender "$DGS_BLENDER" --limit 6
+```
+
+确认后四卡执行：
+
+```bash
+dgs-dataset run --plan "$DGS_ROOT/render-plan.json" \
+  --blender "$DGS_BLENDER" --gpus 0,1,2,3 --retry-incomplete
+```
+
+- 每个GPU一个Blender进程；完成后从共享队列领取下一条。
+- `--gpus`是物理卡编号，覆盖子进程的CUDA_VISIBLE_DEVICES；无需额外设置该变量。
+- `--limit`是所有卡合计的待执行任务数，不是每卡数。
+- 成功且配置一致的任务跳过；失败不阻断其他任务。
+- `--retry-incomplete`覆盖未完成或配置变化任务的已知管线输出，从头重渲染；不续渲染单帧。
+- 输出路径必须唯一，避免启动两个调度器写同一计划。
+- 多卡完整日志分文件保存；终端显示任务开始/完成/失败。
+
+报告和日志在计划旁：`render-plan.run-report.json`、`render-plan.run-report.logs/`。
+报告记录任务ID、GPU、日志路径和失败原因。
+
+目前每卡只跑一个任务，没有 `--jobs-per-gpu` 参数。
+显存占用少不代表计算空闲，应结合GPU-Util及同样任务量的总耗时判断瓶颈。
+多卡也会增加CPU、内存与磁盘负载；单条视频不保证按GPU数量提速。
+
+## 8. 输出目录与标注
+
+数据根目录约定：`models/`、`people/`、`scenes/`、`hdris/`、`textures/`为素材，`renders/`为结果。
+每条渲染输出：
+
+| 文件 | 内容 |
+| --- | --- |
+| `video.mp4` | H.264、yuv420p、CRF18；完整帧序列直接编码 |
+| `image.jpg` | RGB首帧；`--no-video`时不生成 |
+| `rgb/rgb_0001.png` | RGB PNG序列 |
+| `mask/mask_0001.png` | 白色可见主体、黑色背景、抗锯齿边界 |
+| `depth/depth_0001.exr` | 32位Blender Z pass，非显示用灰度图 |
+| `cameras.json` | K、每帧c2w/w2c、时间、角度、路径与framing |
+| `render-config.json` | 输入参数和实际横竖屏尺寸 |
+| `render-report.json` | Blender版本、GPU、耗时、包围盒、归一化与取景信息 |
+| `scene.blend` | 最终组合场景 |
+| `prompt.txt` | 简单描述模板，非自动详细caption |
+| `SUCCESS.json` | 完整帧检查和可选编码结束后生成的完成标记 |
+
+坐标约定：世界坐标为Blender **Z向上**；导出相机坐标为OpenCV **X右、Y下、Z前**。
+c2w把相机点变换到世界，w2c为其逆。K采用水平sensor fit和方形像素，焦距按实际画幅设置。
+深度为Blender Z pass的可见表面相机距离，单位是归一化后的场景单位；背景可能为很大值。
+它不保证等同于CV相机轴向z，使用时应按距离图处理并屏蔽背景。
+主体mask只包含实际可见部分，不包含被场景遮挡的身体，也不包含地面阴影。
+
+## 9. 常见问题
+
+| 问题 | 处理 |
+| --- | --- |
+| `Blender executable not found` | 传 `--blender /实际路径/blender`；检查 `blender --version` |
+| HDRI/模型的 `asset.json` 不存在 | 确认下载root与渲染root一致；用正确ID或 `--model`/`--hdri`完整路径 |
+| 复制示例后找不到 `configs/...json` | 在仓库根目录执行，或使用绝对清单路径 |
+| `CERTIFICATE_VERIFY_FAILED` | 从管理员取得可信CA，用 `--ca-bundle /path/ca.pem`，或DGS_CA_BUNDLE/SSL_CERT_FILE |
+| 临时排查证书问题 | 下载命令显式加 `--insecure`；仅本次进程关闭服务端身份验证 |
+| 下载慢或读超时 | 原清单重跑即可续传；尝试workers=4，实际速度取决于网络 |
+| ZIP不是有效归档 | 链接可能返回登录页或错误页；使用真实ZIP链接或本地领取文件 |
+| 背景下半部分纯色 | studio地面遮住HDRI；改courtyard或完整三维场景 |
+| 人物裁切/朝向不合适 | 调heading、chest/knee、size，先渲染少量帧检查 |
+| 输出目录非空 | 新输出路径，单例 `--overwrite`，批量 `--retry-incomplete` |
+| 多卡终端看不到逐帧日志 | 查看run-report记录的独立log文件 |
+| 缺GPU或初始化失败 | 检查驱动、Blender构建和GPU编号；显式CPU可用于诊断 |
+
+自定义CA或关闭校验选项用于下载命令，渲染命令不需要它们。
+下载可以使用系统HTTP_PROXY/HTTPS_PROXY；不能把素材网页URL当成文件URL。
+
+## 10. 开发与验证
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
+python -m compileall -q src
 ```
 
-测试使用模拟 HTTP 响应，无需外网，覆盖续传、服务端忽略 Range、校验失败、路径安全及模型贴图依赖。
-
-## 来源与许可
-
-Powered by Poly Haven — https://polyhaven.com/
-
-官方 API：https://github.com/Poly-Haven/Public-API
-API 条款：https://github.com/Poly-Haven/Public-API/blob/master/ToS.md
-请求使用项目专属 User-Agent。Poly Haven 资产为 CC0；其他素材许可由清单提供并随资产保存。
-下载代码不自动判断训练或再分发权限。素材不提交到 Git 仓库。
-
-## SSL 证书错误
-
-如果出现 `CERTIFICATE_VERIFY_FAILED: self-signed certificate in certificate chain`，
-可能是代理使用自签 CA，或 Python 环境的 CA 集合缺失。
-从服务器/代理管理员取得可信的 PEM CA bundle，传入 `--ca-bundle /path/to/ca.pem`；
-也可设置 `DGS_CA_BUNDLE` 或 `SSL_CERT_FILE`。所有子命令及文件下载均使用该配置。
-
-```bash
-dgs-assets download --manifest configs/assets.example.json --root /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset --ca-bundle /path/to/ca.pem
-```
-
-临时排查可在同一命令末尾加 `--insecure`，仅对本次进程关闭 HTTPS 证书校验。
-该模式无法验证服务端身份，建议有正确 CA 后移除；默认仍开启校验。
-不支持同时指定 CA bundle 与 `--insecure`。
-
-## 批量下载与离线校验
-
-默认 root 已改为 `/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset`。
-可用 `--root` 覆盖。之前下载到别处的素材不会自动移动。
-
-```bash
-# 生成 20 个物体模型清单；固定 seed，使同一目录数据下选择可复现
-# 若网络证书正常，请移除 --insecure
-dgs-assets manifest --type models --limit 20 --seed 42 --resolution 2k --output configs/models.batch.json --insecure
-
-# 可单独生成 HDRI 清单，不要将 HDRI 当成三维场景
-dgs-assets manifest --type hdris --query outdoor --limit 5 --seed 42 --output configs/hdris.batch.json --insecure
-
-# 先查看下载计划，再下载
-dgs-assets download --manifest configs/models.batch.json --dry-run --insecure
-dgs-assets download --manifest configs/models.batch.json --workers 2 --insecure
-dgs-assets download --manifest configs/hdris.batch.json --workers 2 --insecure
-
-# 不访问网络、不依赖 Blender；检查文件是否存在、大小、MD5/SHA256及遗留 part
-dgs-assets verify
-```
-
-`manifest` 从官方目录过滤关键词（ID/元数据），排除尚未发布的素材，按 ID 排序后用固定随机种子抽样。
-它生成可编辑的选择清单，不保证每个 ID 都提供所选格式；可用 download --dry-run 确认。
-关键词是子串匹配，不是语义搜索。上游目录变化时抽样也可能变化，因此应保存生成的清单。
-物体、纹理、HDRI 分开建清单；完整三维场景和人物仍通过 direct 清单加入。
-
-`verify` 默认生成 dataset/verification-report.json；无完整素材、文件损坏、元数据异常或遗留 .part 时退出码为 1。
-报告只检查已存在的 asset.json，不证明某个下载清单的所有资产均已完成；下载失败还应查看 download-report.json。
-发现损坏后重新执行原下载清单即可修复。不自动删除素材。
-兼容旧版 asset.json 的资产目录相对路径，新版额外保存 dataset_path，方便渲染批量读取。
-校验阶段不会检查 Blender 加载、贴图绑定或模型视觉质量，这些需后续试渲染。
-
-下载时每个文件开始、结束以及传输期间约每秒输出一行进度：文件名、百分比、MiB 和 MiB/s。
-并发下载的进度按文件名区分；服务器日志中保留每行，不需要交互终端。大小未知时显示 `? %`。
-已验证的文件显示 `[skip]`。进度写到 stderr；最后的 100% 仅代表传输结束，随后仍需校验。
-
-## 单样例环绕渲染
-
-依赖：Linux Blender **4.2–4.5**（推荐官方下载的 4.5 LTS 二进制）与 ffmpeg。
-Blender 是独立程序，不要在普通 Python 环境 pip install bpy 来替代此启动流程。
-Blender 5 的合成器 API 暂未支持。下载阶段的 Python 环境不必装 torch。
-
-```bash
-# 更新后重新安装，注册新增的 dgs-render 命令
-python -m pip install -e .
-blender --version
-ffmpeg -version
-
-# 先渲染 3 帧、640×360，检查加载、贴图、GPU 与输出
-CUDA_VISIBLE_DEVICES=4 dgs-render --frames 3 --width 640 --height 360 --samples 16 \
-  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/horse_smoke
-
-# 通过后再做 81 帧、720P、90° 环绕
-CUDA_VISIBLE_DEVICES=4 dgs-render --frames 81 --samples 32 --sweep 90 \
-  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/horse_orbit_90
-```
-
-默认从 root 下的 `horse_statue_01` 与 `abandoned_factory_canteen_01` 的 asset.json 找到主文件。
-旧下载位于其他目录时用 `--root /实际素材根目录`；输出仍可独立通过 --output 指定。
-Blender 没在 PATH 中时加 `--blender /完整路径/blender`。
-默认 CUDA，可显式选 `--device OPTIX` 或 `--device CPU`。没有可用 GPU 时明确失败，不静默切换 CPU。
-`CUDA_VISIBLE_DEVICES` 在启动前指定 GPU；不要与下载命令的 workers 混淆。
-不编码视频时用 `--no-video`，此时无需 ffmpeg，首帧保留为 rgb/rgb_0001.png。
-
-输出包含：
-
-- `video.mp4`：RGB 环绕视频；`image.jpg`：首帧。
-- `rgb/rgb_0001.png` 等：无损帧。
-- `mask/mask_0001.png` 等：白色主体、黑色背景，包含抗锯齿边界。
-- `depth/depth_0001.exr` 等：32 位 Blender Z pass；不是直接可视化的灰度图片。
-- `cameras.json`：K、每帧 OpenCV 坐标约定的 c2w/w2c、时间和文件名。
-- `scene.blend`、`render-config.json`、`render-report.json`、`prompt.txt`。
-- `SUCCESS.json`：渲染帧齐全且编码成功后生成。
-
-主体按包围盒最长边归一化到 2 个场景单位、底部贴地；物体与灯光保持静止，仅相机移动。
-相机保持目标中心，默认固定半径 4.5、仰角 12°、焦距 35mm、从 -90° 开始扫过 90°。
-可调 `--subject-size`、`--radius`、`--elevation`、`--start-angle`、`--sweep`、`--focal-mm`。
-360° 时首尾重复视角（非无缝循环编码策略）；实际构图需查看 smoke 图片后调节。
-深度单位是归一化后的场景单位，Z pass 为可见表面的相机距离，背景可能为很大数值。
-透视内参采用水平 sensor fit、方形像素；相机坐标 X 右/Y 下/Z 前，世界坐标 Z 上。
-场景为大地面 + HDRI，不是完整食堂环境；地面有三维视差，HDRI 只提供远景/光照。
-
-支持 .blend/.glb/.gltf/.fbx/.obj 单主体。blend 中所有几何作为一个主体加载，原相机/灯光关闭；
-不会自动从含多个场景物体的 blend 中识别主角。导入主体冻结动画，人物使用已摆好姿势的素材。
-贴图缺失时生成失败报告并停止；不生成粉色贴图视频。合成器一次渲染同时输出 RGB/mask/depth。
-输出目录非空时拒绝覆盖；改目录或使用 --overwrite（删除管线已知输出文件，不删除其他文件）。
-启动脚本先检查素材、Blender、ffmpeg，再调用 Blender。Blender 错误会传回非零退出码。
-这里尚未在真实 Blender/GPU 上试渲染，需用 3 帧 smoke 命令验证版本与画面。
-
-## 完整三维环境
-
-### 无需下载的测试庭院
-
-`--environment courtyard` 创建有真实几何的铺地、四周围墙、立柱、墙面装饰和花坛。
-它是用于打通场景管线的简单程序化环境，不是高质量扫描场景；HDRI 仍提供天空和照明。
-庭院场景不添加原来 200×200 的纯色地面，近处与中远处的几何有正确视差。
-
-```bash
-HDRI_ID=$(python -c "import json; print(json.load(open('configs/hdri.smoke.json'))['assets'][0]['id'])")
-CUDA_VISIBLE_DEVICES=3 dgs-render \
-  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
-  --model-id chinese_cabinet --hdri-id "$HDRI_ID" \
-  --environment courtyard \
-  --frames 3 --width 640 --height 360 --samples 16 --no-video \
-  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_courtyard_smoke
-```
-
-### 外部场景
-
-```bash
-CUDA_VISIBLE_DEVICES=3 dgs-render \
-  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
-  --model-id chinese_cabinet \
-  --scene /absolute/path/environment.blend \
-  --subject-position 0 0 0 --subject-heading 0 \
-  --radius 4.5 --frames 3 --width 640 --height 360 --samples 16 --no-video \
-  --output /mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_scene_smoke
-```
-
-`--scene` 加载 .blend 当前活动场景，保留环境几何、材质、灯光和 world；不添加地面。
-该模式无需额外 HDRI，`--hdri-id` 不生效；如需替换 world，显式传 `--hdri /absolute/path/light.hdr`。
-原场景的相机、合成器、分辨率和色彩管理被渲染管线替换，原文件不写入，只保存输出目录的 scene.blend。
-场景纹理必须随原场景保存正确相对路径或打包在 .blend 中；不要只下载 blend 而漏掉贴图依赖。
-场景模型需适配 Blender 4.2–4.5，特殊插件、Geometry Nodes 外部依赖和模拟缓存须事先准备。
-
-`--subject-position X Y Z` 指定主体底部中心的世界坐标；`--subject-heading` 指定绕 Z 轴旋转角度。
-`--subject-size` 是主体最长边的目标长度，场景本身不缩放；场景应采用合理单位。
-相机轨迹的中心跟随主体，不再绑定世界原点。程序化庭院也跟随位置整体平移。
-仅支持静态场景：对象动画被冻结，但物理模拟、材质/节点动画和特殊驱动应先在 Blender 中烘焙或移除。
-不会自动寻找空地、吸附复杂地形、检测碰撞或避让墙壁。请设置位置、半径，并先做 3 帧测试。
-主角可能被环境遮挡；主体 mask 仅包含实际可见部分。原环境对象索引清零，确保不混入主体 mask。
-
-## 121 帧球面双环轨迹与随机横竖屏
-
-```bash
-# 自动找已下载的 HDRI，渲染 chinese_cabinet + 庭院并编码 video.mp4
-bash scripts/test_figure8.sh
-
-# 示例参数覆盖；使用不同输出目录
-DGS_THETA=40 DGS_PHI=8 DGS_SEED=123 DGS_ORIENTATION=portrait \
-DGS_OUTPUT=/mnt/DataPart/jianghongda/related_work/Data-Generation-Server/dataset/renders/cabinet_figure8_portrait \
-bash scripts/test_figure8.sh
-```
-
-dgs-render 新默认：`--trajectory figure8 --frames 121 --theta 30 --phi 5 --orientation random`。
-分辨率为 1280×720 或 720×1280，横竖屏用 seed 可复现抽样，实际尺寸记录在 render-config.json。
-`--orientation landscape/portrait` 固定方向；`keep` 保留显式 width/height 顺序。
-横竖屏保持短边方向的视场角，防止竖屏时主体突然放大或被裁切；camera K 按实际焦距记录。
-
-以初始方位角/仰角为 (0,0) 偏移，轨迹节点为：
-右环 `(0,0) → (0,+φ) → (+θ,+φ) → (+θ,-φ) → (0,-φ) → (0,0)`；
-左环 `(0,0) → (0,+φ) → (-θ,+φ) → (-θ,-φ) → (0,-φ) → (0,0)`。
-这严格按所指定的十段动作实现两个镜像环，不是正弦形式的连续数学 8 字曲线。
-121 帧包含 120 个时间间隔，每段 12 个间隔；第 1/61/121 帧位姿一致，共享中间帧只渲染一次。
-各段用五次缓入缓出，在转角平滑停顿，避免方向突然跳变；不是全程匀速。
-固定球面半径、全程看向球心，无 roll；右移按初始相机视角对应方位角增大。
-默认初始方位 -90°、仰角 12°，因此 φ=5 时实际仰角在 7°–17°。
-`--start-angle` 决定初始面向主体的位置；模型正面朝向依赖资产，可用 --subject-heading 调整。
-`--trajectory orbit --frames 81 --orientation landscape` 可继续使用原来的单圈轨迹。
-自动用 ffmpeg 将完整 121 帧序列编码为单个 video.mp4（24fps 时约 5.04 秒），不单独编码拼接左右段。
-需安装 ffmpeg；--no-video 仅输出帧。当前会话无法访问服务器 GPU，本地只验证轨迹和启动逻辑。
-
-## 扫描人物样例下载
-
-```bash
-python -m pip install -e .
-# 官方免费新 Posed People 的 GLB ZIP；不要求账号
-# 下载使用已有断点续传和校验逻辑，然后安全解压、列出模型路径
-dgs-people --provider renderpeople --insecure
-```
-
-素材保存在 dataset/people/direct/renderpeople_free_posed/；ZIP、来源记录与 extracted/ 下完整目录结构一并保留。
-命令会列出支持渲染的模型路径，选择一个传给 `dgs-render --model /完整路径/model.glb`。
-官方 ZIP 可能含多个文件，请按输出路径选择模型，不假设文件名。
-现有渲染脚本支持 --model；人物不会通过 --model-id 在 models/polyhaven 下查找。
-
-Humano3D 免费产品目前需要先选择格式并领取，未发现公开 ZIP 直链。先在
-https://humano3d.com/free-sample/ 选择 Blender 或 OBJ/FBX 格式，再使用取得的文件链接或 ZIP：
-
-```bash
-dgs-people --provider humano3d --url '实际ZIP下载链接' --insecure
-# 或已在其他电脑领取并传到服务器
-dgs-people --provider humano3d --archive /absolute/path/people.zip
-```
-
-也可给 Renderpeople 指定 --url 或 --archive 选择其他官方样例/格式。
-不模拟注册、购物车或账号登录，不自动刷新领取链接。signed URL 应当保持私密；不要将其提交到 Git。
-解压拒绝越界路径、符号链接及大于 20GiB 的归档；ZIP CRC 错误会中止，不替换旧的已解压内容。
-人物可在场景内使用，但模型采用各供应商许可，不是 CC0；下载与渲染许可不等同于训练或公开数据集许可。
-此实现已检索到 Renderpeople 官方直链，但当前执行环境未实际下载该二进制 ZIP；需服务器验证。
-
-## 数据扩充、数量检查与批量组合
-
-### 1. 扩充物体与背景，检查缺口
-
-```bash
-python -m pip install -e .
-bash scripts/expand_assets.sh
-```
-
-下载 24 个物体候选、24 个 HDRI 候选，留出格式/下载失败余量；已有清单保留，重跑会续传。
-最后生成 dataset/catalog.json 和 coverage-report.json。默认目标 **每类至少 11 个**。
-库存检查对象：objects（物体）、people（人物）、scenes（场景）、backgrounds（HDRI）。
-检查缺口时退出码为 1 是正常结果，不表示全部下载失败。每个下载清单也有自己的成功/失败输出。
-本脚本会用 --insecure，保持与你当前代理环境一致；有可信 CA 时应替换为 --ca-bundle。
-
-```bash
-dgs-dataset inventory
-```
-
-catalog.json 列出模型路径、SHA256、enabled、review 和可选 notes。
-检查后将 review 设为 approved，不合适的素材 enabled=false。再次 inventory 保留审核信息。
-同一人物的 LOD、格式、换色不应计为多个人：检查后给它们填写相同的 identity 字符串。
-脚本按常见命名和同文件哈希尽量去重，但不能自动识别同一人的不同姿态。
-数量报告同时列出候选数量、unique_identities、approved、procedural 和 external；文件存在不代表视觉合格。
-
-**场景现状**：内置 12 个庭院布局/色调参数变体，不是 12 个独立下载的高质量环境；报告会单列来源类型。
-要扩充独立三维场景，请把带依赖的 .blend 场景放到 dataset/scenes/，再 inventory。
-也可在 catalog.scenes 手动注册 `{ "id":"room01", "path":"/absolute/path/room.blend", "position":[0,0,0], "enabled":true, "review":"approved" }`。
-场景位置是主体脚底/底面中心，应由你检查空地与相机路径，不自动做碰撞避免。
-
-**人物现状**：已验证公开直链只覆盖当前一个样例，不能声称已达到 11 人。
-从 Renderpeople/Humano3D 领取更多样例/许可模型后，可逐包导入独立 ID：
-
-```bash
-dgs-people --provider humano3d --archive /path/sample02.zip --id humano_sample02
-dgs-people --provider renderpeople --url '官方文件直链' --id renderpeople_sample03 --insecure
-dgs-dataset inventory
-```
-
-不注册账号、不自动购买模型；新增人物文件也可直接放在 dataset/people/ 下。
-
-### 2. 生成固定组合清单
-
-```bash
-# 每个主体选一个随机场景×HDRI组合，每个组合生成6条视频（近中远×横竖屏）
-dgs-dataset plan --catalog dataset/catalog.json --output dataset/render-plan.json \
-  --combinations-per-subject 1 --seed 42
-
-# 每个主体选3种组合；正式数据可加 --approved-only，只使用审核通过的素材
-# --all-combinations 会枚举全部：N主体×N场景×N背景×6，数量可能非常大
-```
-
-默认包含待检查候选，适合先出样例；正式计划建议 --approved-only。
-每个组合固定 121 帧、θ30°/φ5°、720P。计划 settings 中可批量调整 frames/theta/phi/samples/radius。
-每条视频使用不同输出目录，横竖屏成对，模型/场景/背景组合保持一致。
-计划保存了绝对路径，重新抽样前应另存计划，保证实验可复现。
-
-### 3. 先运行一个组合的6条视频
-
-```bash
-dgs-dataset run --plan dataset/render-plan.json \
-  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender --limit 6
-
-# 确认后跑剩余任务：完成且配置一致的任务跳过，失败不阻断其他组合
-CUDA_VISIBLE_DEVICES=3 dgs-dataset run --plan dataset/render-plan.json \
-  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
-  --retry-incomplete
-```
-
-run 按顺序启动 Blender，每条任务GPU加载一次，避免同时抢显存；报告逐条写入 render-plan.run-report.json。
---retry-incomplete 会覆盖不完整/参数变化任务的管线输出并重渲染，不做逐帧恢复。
-模型下载仍可在另一个终端继续。不要多个渲染进程写同一输出目录。
-
-### 景别定义及校验
-
-- 物体近/中/远：以完整主体为目标，预期占画面比例约85%/64%/40%，宽主体由水平视场限制距离。
-- 人物近：高度0.65到1.0（胸部—头部）；中：0.28到1.0（膝盖—头部）；远：原球面半径4.5、全身中心。
-- 人物近/中按取景区域的中心改变球心，再根据竖直视场计算球面半径；全过程朝球心，保持8字路径。
-- catalog.people 中 chest/knee 是0–1高度比例，可针对人物姿态调整；heading 为正面旋转角，size 为最长边归一化大小。
-- 这是包围盒近似，不是骨骼检测。手臂抬高、坐姿、道具、宽衣服可能改变包围盒，需你检查首帧及全过程。
-- 横竖屏按同样景别重新算距离，人物近中景裁切下半身是预期；远景保留你已验证的距离。
-- framing.target、effective_radius 写入 cameras.json 与 render-report.json，可检查实际距离；不同角度可能改变裁切边界。
-
-### 四卡并行
-
-```bash
-dgs-dataset run --plan dataset/render-plan.json \
-  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
-  --gpus 0,1,2,3 --retry-incomplete
-```
-
-每卡一个 Blender 进程，独立设置 CUDA_VISIBLE_DEVICES；卡完成任务后从共享队列获取下一条。
---limit 为所有卡合计的任务数量，不是每卡数量。默认不指定 --gpus 时保持原单进程行为。
-多卡模式的完整渲染日志保存到计划旁的 render-plan.run-report.logs/；终端显示任务开始/结束。
-run-report.json 记录每条任务的 gpu 和 log 路径。已完成且配置一致的任务仍跳过。
-并行提高批量吞吐，单条视频速度不承诺提高4倍；CPU、内存和磁盘也可能成为瓶颈。
---gpus 指定物理编号，会覆盖子进程继承的 CUDA_VISIBLE_DEVICES，无需在命令前另外设置。
+测试覆盖下载恢复、校验、路径安全、ZIP解压、轨迹节点与镜像、横竖屏、景别计算、组合数量、多GPU队列和隔离。
+HTTP、Blender启动及GPU分配测试使用模拟，不代替真实服务器渲染。
+当前使用者已在服务器验证物体、人物、庭院和121帧轨迹；新素材仍应先做加载/视觉检查。
+
+源码入口：
+
+| 文件 | 职责 |
+| --- | --- |
+| `assets.py` | 官方API、清单解析、下载、完整性检查 |
+| `people.py` | 人物包下载与安全解压 |
+| `render.py` | 参数检查、Blender启动、编码 |
+| `blender_orbit.py` | Blender内导入、场景、相机、标注和渲染 |
+| `trajectory.py` / `shots.py` | 轨迹与景别计算 |
+| `dataset.py` | 库存审核、任务计划、单卡/多卡调度 |
+
+提交问题时建议附：commit、Blender版本、GPU/驱动、完整命令、报错日志及相关配置。
+下载签名链接、账号信息和私密路径可先脱敏。提交代码不要包含数据、模型或渲染输出。
+
+## 素材来源与许可
+
+- [Poly Haven](https://polyhaven.com/)资产为CC0；实时API使用需遵循[API条款](https://github.com/Poly-Haven/Public-API/blob/master/ToS.md)，本项目使用专属User-Agent并注明来源。
+- [Renderpeople](https://renderpeople.com/free-3d-people/)与[Humano3D](https://humano3d.com/free-sample/)使用各自供应商许可，不是CC0。
+- 本项目下载并记录来源，不自动判断训练、公开数据集或素材再分发权限。免费渲染素材不等于允许任意训练用途。
+- 仓库不附带第三方素材；发布生成数据前请核对相应许可。
