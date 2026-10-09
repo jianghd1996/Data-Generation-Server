@@ -117,15 +117,33 @@ def plan_jobs(catalog, output, seed=42, combinations=1, all_combinations=False, 
     return {'version': 1, 'root': catalog['root'], 'environment_sampling': environment_sampling if not all_combinations else 'all-combinations', 'settings': {'frames': 121, 'theta': 30, 'phi': 5, 'samples': 32, 'radius': 4.5}, 'jobs': jobs}
 
 
-def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=False):
-    plan = plan_jobs(catalog, output, seed=seed, all_combinations=True,
-                     external_scenes_only=external_scenes_only)
-    plan['jobs'] = [job for job in plan['jobs'] if job['shot'] == 'far' and job['orientation'] == 'landscape']
-    for job in plan['jobs']:
-        job['auto_place'] = bool(job['scene'].get('path'))
-    plan['settings'].update(frames=1, samples=samples, no_video=True, no_save_scene=True)
-    plan['preview'] = True
-    return plan
+def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=False, all_combinations=False):
+    def usable(category):
+        return [entry for entry in catalog[category] if entry.get('enabled', True)
+                and (not entry.get('path') or Path(entry['path']).is_file())]
+    subjects = [('object', entry) for entry in usable('objects')] + [('person', entry) for entry in usable('people')]
+    scenes, backgrounds = usable('scenes'), usable('backgrounds')
+    if external_scenes_only: scenes = [entry for entry in scenes if entry.get('path')]
+    if not subjects or not scenes or not backgrounds:
+        raise ValueError('Need at least one enabled subject, scene, and background')
+    rng = random.Random(seed)
+    for pool in (subjects, scenes, backgrounds): rng.shuffle(pool)
+    if all_combinations:
+        pairs = itertools.product(subjects, scenes, backgrounds)
+    else:
+        count = max(len(subjects), len(scenes), len(backgrounds))
+        pairs = ((subjects[i % len(subjects)], scenes[i % len(scenes)], backgrounds[i % len(backgrounds)]) for i in range(count))
+    jobs = []
+    for index, ((kind, subject), scene, background) in enumerate(pairs):
+        identity = f"preview_{kind}_{subject['id']}__{scene['id']}__{background['id']}__{index:04d}"
+        job_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
+        jobs.append({'id': job_id, 'kind': kind, 'subject': subject, 'scene': scene, 'background': background,
+                     'shot': 'far', 'orientation': 'landscape', 'seed': seed,
+                     'auto_place': bool(scene.get('path')), 'output': str((output / job_id).resolve())})
+    return {'version': 1, 'root': catalog['root'], 'preview': True,
+            'environment_sampling': 'all-combinations' if all_combinations else 'coverage',
+            'settings': {'frames': 1, 'theta': 30, 'phi': 5, 'samples': samples, 'radius': 4.5,
+                         'no_video': True, 'no_save_scene': True}, 'jobs': jobs}
 
 
 def command_for(job, settings, blender, root):
@@ -247,6 +265,7 @@ def main(argv=None):
     preview.add_argument('--output', type=Path, required=True, help='Preview plan JSON')
     preview.add_argument('--render-root', type=Path, required=True)
     preview.add_argument('--samples', type=int, default=16)
+    preview.add_argument('--all-combinations', action='store_true', help='Opt into full Cartesian product instead of minimal element coverage')
     preview.add_argument('--seed', type=int, default=42)
     preview.add_argument('--external-scenes-only', action='store_true')
     run = sub.add_parser('run')
@@ -269,11 +288,11 @@ def main(argv=None):
     if args.action == 'preview':
         if args.samples < 1: parser.error('--samples must be positive')
         catalog = json.loads(args.catalog.read_text())
-        result = preview_jobs(catalog, args.render_root, args.seed, args.samples, args.external_scenes_only)
+        result = preview_jobs(catalog, args.render_root, args.seed, args.samples, args.external_scenes_only, args.all_combinations)
         write_json(args.output, result)
         from .preview_gallery import write_gallery
         gallery = write_gallery(result, args.render_root)
-        print(f"Planned {len(result['jobs'])} images (all enabled subjects x scenes x backgrounds); gallery: {gallery}")
+        print(f"Planned {len(result['jobs'])} images; mode={result['environment_sampling']}; gallery: {gallery}")
         return 0
     if args.action == 'plan':
         catalog = json.loads(args.catalog.read_text())

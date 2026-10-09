@@ -127,10 +127,10 @@ class PreviewTests(unittest.TestCase):
                        'people': [{'id': 'person', 'path': str(model)}],
                        'scenes': [{'id': 'external', 'path': str(scene)}, {'id': 'court', 'environment': 'courtyard', 'preset': 0}],
                        'backgrounds': [{'id': 'sky1', 'path': str(sky)}, {'id': 'sky2', 'path': str(sky)}]}
-            plan = preview_jobs(catalog, root / 'previews')
+            plan = preview_jobs(catalog, root / 'previews', all_combinations=True)
             self.assertEqual(len(plan['jobs']), 8)
             self.assertEqual(plan['settings']['frames'], 1)
-            job = plan['jobs'][0]
+            job = next(j for j in plan['jobs'] if j['scene']['id'] == 'external')
             command = command_for(job, plan['settings'], '/blender', str(root))
             for flag in ('--no-video', '--no-save-scene', '--auto-place'): self.assertIn(flag, command)
             gallery = write_gallery(plan, root / 'previews')
@@ -147,3 +147,22 @@ class PreviewTests(unittest.TestCase):
                 (output / folder).mkdir()
                 (output / folder / filename).touch()
             self.assertTrue(job_complete(job, plan['settings']))
+
+
+class CoveragePreviewTests(unittest.TestCase):
+    def test_minimum_number_covers_every_element_deterministically(self):
+        from data_generation_server.dataset import preview_jobs
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'asset'; path.touch()
+            catalog = {'root': str(root), 'objects': [{'id': 'object', 'path': str(path)}],
+                       'people': [{'id': 'person', 'path': str(path)}],
+                       'scenes': [{'id': f'scene{i}', 'environment': 'courtyard', 'preset': i} for i in range(3)],
+                       'backgrounds': [{'id': f'sky{i}', 'path': str(path)} for i in range(5)]}
+            plan = preview_jobs(catalog, root / 'output')
+            self.assertEqual(len(plan['jobs']), 5)
+            self.assertEqual(plan, preview_jobs(catalog, root / 'output'))
+            self.assertEqual({job['subject']['id'] for job in plan['jobs']}, {'object', 'person'})
+            self.assertEqual({job['scene']['id'] for job in plan['jobs']}, {f'scene{i}' for i in range(3)})
+            self.assertEqual({job['background']['id'] for job in plan['jobs']}, {f'sky{i}' for i in range(5)})
+            self.assertEqual(len({job['output'] for job in plan['jobs']}), 5)

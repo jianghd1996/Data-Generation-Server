@@ -591,9 +591,9 @@ Barcelona Pavilion 原包可能缺少 `.blend` 引用的 `water bump.jpg`，但�
 试渲染确认后，将实际坐标填入 catalog.scenes 的 position，再重新生成批量 plan。
 
 
-### 所有素材组合的单帧检查
+### 所有素材元素的单帧检查
 
-扫描后创建全部启用的 object/human × scene × background 组合；每个组合一张 720P 横屏远景。
+默认用最少组合覆盖所有启用的 object/human、scene 和 background，每个元素至少出现一次；每项一张 720P 横屏远景。
 外部场景自动寻找支撑和无遮挡位置，程序场景沿用设置。保留 RGB/mask/depth/报告，不编码视频，
 不重复保存 scene.blend。第一帧检查不能保证所有景别、横竖屏和轨迹帧均正常。
 
@@ -604,7 +604,8 @@ dgs-dataset run --plan "$DGS_ROOT/preview-plan.json" --blender "$DGS_BLENDER" --
 ```
 
 inventory 的数量不足退出码 1 不影响 preview 读取已生成的 catalog；不要用 && 将两者连起来。
-preview 打印实际图片数量（32 主体 × 14 场景 × 24 背景 = 10752 张）。
+preview 默认图片数量为 max(主体数, 场景数, 背景数)，例如 32 主体、14 场景、24 背景只生成 32 张。
+较小素材池循环使用；固定 seed 可复现。只有显式增加 --all-combinations 才会遍历全部组合。
 默认包括 12 个庭院变体；只检查下载场景，可给 preview 增加 `--external-scenes-only`。
 run 重复执行会跳过完成项；失败详情在 preview-plan.run-report.json 和对应 logs 目录。
 

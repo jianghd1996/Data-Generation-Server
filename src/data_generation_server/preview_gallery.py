@@ -17,7 +17,7 @@ def write_gallery(plan, root):
     data = json.dumps(records, ensure_ascii=False).replace('<', '\\u003c')
     html = '''<!doctype html><html lang="zh"><meta charset="utf-8"><title>DGS 素材组合检查</title>
 <style>body{font:15px system-ui;background:#f3f4f6;margin:24px;color:#222}header{position:sticky;top:0;background:#f3f4f6;padding:12px 0}select,input,button{padding:8px;margin:4px}#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}article{background:white;padding:12px;border-radius:8px;overflow-wrap:anywhere}img{width:100%;aspect-ratio:16/9;object-fit:contain;background:#ddd}p{margin:6px 0}a{margin-right:12px}</style>
-<h1>素材组合检查</h1><p>每个启用的物体/人物 × 场景 × 背景，一张 720P 横屏远景图。图片未生成时显示“待生成或失败”，具体错误见批次日志。</p>
+<h1>素材组合检查</h1><p>每个启用的物体/人物、场景和背景至少出现一次；每项一张 720P 横屏远景图。图片未生成时显示“待生成或失败”，具体错误见批次日志。</p>
 <header><select id="kind"><option value="">全部主体</option><option>object</option><option>person</option></select><select id="scene"></select><select id="background"></select><input id="search" placeholder="搜索主体名称"><button id="prev">上一页</button><button id="next">下一页</button><span id="count"></span></header><main id="grid"></main>
 <script>const rows=__DATA__;let page=0;const size=48;const get=id=>document.getElementById(id);
 for(const key of ['scene','background']){const all=new Option('全部'+(key==='scene'?'场景':'背景'),'');get(key).add(all);[...new Set(rows.map(r=>r[key]))].sort().forEach(v=>get(key).add(new Option(v,v)));}
