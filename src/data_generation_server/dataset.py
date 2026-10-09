@@ -44,7 +44,7 @@ def inventory(root, previous=None):
             registered_scene_paths.add(str(Path(entry['path']).resolve()))
     for category, directory, suffixes in [('people', 'people', set(EXTENSIONS)), ('scenes', 'scenes', {'.blend'}), ('backgrounds', 'hdris', {'.hdr', '.exr'})]:
         seen_hashes, seen_names = set(), set()
-        files = sorted((p for p in (root / directory).rglob('*') if p.suffix.lower() in suffixes), key=lambda p: (EXTENSIONS.get(p.suffix.lower(), 0), str(p)))
+        files = sorted((p for p in (root / directory).rglob('*') if p.suffix.lower() in suffixes), key=lambda p: (EXTENSIONS.get(p.suffix.lower(), 0), 0 if p.stem.lower().endswith('_zup_a') else 1, str(p)))
         for path in files:
             if category == 'scenes':
                 if str(path.resolve()) in registered_scene_paths : continue
@@ -55,7 +55,10 @@ def inventory(root, previous=None):
             name = re.sub(r'(?i)([_-]LOD\d+.*|[_-](1k|2k|4k|8k))$', '', path.stem)
             if category == 'people':
                 name = re.sub(r'(?i)[_-]\d+k$', '', name)
-            key = (str(path.parent), name)
+                renderpeople = re.match(r'(?i)^(rp_(?:.+?_(?:posed|rigged)_\d+|posedplus_\d+_\d+|posed_\d+_\d+))(?:_|$)', name)
+                if renderpeople:
+                    name = renderpeople[1].lower()
+            key = ('renderpeople' if category == 'people' and renderpeople else str(path.parent), name)
             if fingerprint in seen_hashes or key in seen_names: continue
             seen_hashes.add(fingerprint); seen_names.add(key)
             identifier = name + '_' + hashlib.sha256(str(path.relative_to(root)).encode()).hexdigest()[:8]

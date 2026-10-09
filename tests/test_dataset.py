@@ -41,6 +41,17 @@ class DatasetTests(unittest.TestCase):
             self.assertTrue(all(x['review'] == 'approved' for x in catalog['people']))
             self.assertEqual(len(inventory(root, catalog)['people']), 2)
 
+    def test_renderpeople_rigged_variants_are_one_candidate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = root / 'people/pack'
+            folder.mkdir(parents=True)
+            for suffix in ('u3d', 'ue4', 'yup_a', 'yup_t', 'zup_a', 'zup_t'):
+                (folder / f'rp_eric_rigged_001_{suffix}.fbx').write_text(suffix)
+            catalog = inventory(root)
+            self.assertEqual(len(catalog['people']), 1)
+            self.assertTrue(catalog['people'][0]['path'].endswith('_zup_a.fbx'))
+
     def test_framing_distances_and_person_targets(self):
         for width, height in ((1280, 720), (720, 1280)):
             person = [shot_setup('person', shot, 2, 0.6, width, height, 35, 4.5, 12, 5) for shot in ('near', 'medium', 'far')]

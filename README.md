@@ -536,3 +536,18 @@ dgs-people --provider humano3d --archive-dir /path/to/authorized-zips --root "$D
 
 人物扫描会合并同目录中相同名称的 OBJ/FBX 和 `_30k`、`_100k` 等网格精度版本。
 经典包的母子合体仍是一项可渲染素材；identity 需人工审核，不代表单个自然人。
+
+
+### 更多 Renderpeople 人物
+
+`--batch` 还会下载 Posed Plus 静态样本。该官方外层 ZIP 含多种软件格式，约 1 GiB 以上；
+解压时只展开其中 OBJ/FBX/GLB 子包，避免导入同一人物的多个软件版本。
+需要额外三个带骨骼人物（Eric、Carla、Claudia）可使用：
+
+```bash
+dgs-people --batch --include-rigged --root "$DGS_ROOT" --insecure
+dgs-dataset inventory --root "$DGS_ROOT" --minimum 11
+```
+
+骨骼人物是 A/T 等参考姿态，扫描优先选择 Z-up A-pose FBX，合并其他坐标轴/平台版本；
+渲染前检查材质及姿态，按需在 catalog 中禁用。新增包仍不保证达到 11 个不同人物素材。

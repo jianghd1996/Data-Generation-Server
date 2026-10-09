@@ -25,6 +25,10 @@ def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 
             current_archive, destination_root, depth = queue.pop(0)
             with zipfile.ZipFile(current_archive) as zipped:
                 entries = zipped.infolist()
+                # Posed Plus ships every application format in separate nested ZIPs.
+                universal = [item for item in entries if item.filename.lower().endswith('_obj_fbx_glb.zip')]
+                if expand_nested and universal:
+                    entries = [item for item in entries if not item.filename.lower().endswith('.zip') or item in universal]
                 expanded_bytes += sum(item.file_size for item in entries)
                 if expanded_bytes > max_bytes:
                     raise ValueError('Archive exceeds configured extraction limit (including nested ZIPs)')
@@ -63,6 +67,7 @@ def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Download Renderpeople sample or supplied Humano3D ZIP')
     parser.add_argument('--batch', action='store_true', help='Download official new and classic posed packs')
+    parser.add_argument('--include-rigged', action='store_true', help='With --batch, also download rigged FBX samples; review rest pose before use')
     parser.add_argument('--manifest', type=Path, help='Batch JSON: assets with id, provider, url or archive')
     parser.add_argument('--archive-dir', type=Path, help='Import all ZIPs in a directory')
     parser.add_argument('--source-url', help='Source page for supplied archives')
@@ -75,6 +80,8 @@ def main(argv=None):
     parser.add_argument('--insecure', action='store_true')
     parser.add_argument('--ca-bundle', type=Path)
     args = parser.parse_args(argv)
+    if args.include_rigged and not args.batch:
+        parser.error('--include-rigged requires --batch')
     if args.batch or args.manifest or args.archive_dir:
         if sum(bool(x) for x in (args.batch, args.manifest, args.archive_dir)) != 1 or args.url or args.archive or args.id:
             parser.error('Choose one batch input; do not combine with --url/--archive/--id')
@@ -128,7 +135,12 @@ def batch(args):
             {'id': 'renderpeople_free_posed', 'provider': 'renderpeople', 'url': RENDERPEOPLE},
             {'id': 'renderpeople_classic_posed', 'provider': 'renderpeople',
              'url': 'https://renderpeople.com/sample/free/renderpeople_free_posed_people_OBJ.zip'},
+            {'id': 'renderpeople_plus_posed', 'provider': 'renderpeople',
+             'url': 'https://renderpeople.com/sample/free/rp_posedplus_00068_18.zip'},
         ]
+        if args.include_rigged:
+            entries.append({'id': 'renderpeople_free_rigged', 'provider': 'renderpeople',
+                            'url': 'https://renderpeople.com/sample/free/renderpeople_free_rigged_people_FBX.zip'})
     elif args.manifest:
         data = json.loads(args.manifest.read_text())
         entries = data['assets']
