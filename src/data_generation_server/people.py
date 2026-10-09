@@ -34,7 +34,8 @@ def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 
                     raise ValueError('Archive exceeds configured extraction limit (including nested ZIPs)')
                 paths = set()
                 for item in entries:
-                    target = safe_path(destination_root, item.filename.rstrip('/'))
+                    archive_path = item.filename.replace('\\', '/').rstrip('/')
+                    target = safe_path(destination_root, archive_path)
                     if stat.S_ISLNK(item.external_attr >> 16):
                         raise ValueError('Archive symlinks are not supported')
                     if target in paths or (target.exists() and not item.is_dir()):

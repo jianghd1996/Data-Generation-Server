@@ -44,7 +44,7 @@ class PeopleTests(unittest.TestCase):
             inner = io.BytesIO()
             with zipfile.ZipFile(inner, 'w') as zipped:
                 zipped.writestr('person/model.obj', b'mesh')
-                zipped.writestr('person/color.png', b'texture')
+                zipped.writestr('person\\color.png', b'texture')
             with zipfile.ZipFile(archive, 'w') as zipped:
                 zipped.writestr('person.zip', inner.getvalue())
             self.assertEqual(unpack(archive, root / 'extracted', expand_nested=True),
