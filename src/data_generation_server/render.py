@@ -46,6 +46,7 @@ def main(argv=None):
     parser.add_argument('--scene', type=Path, help='Complete .blend environment; retains world and lights')
     parser.add_argument('--environment', choices=['studio', 'courtyard'], default='studio')
     parser.add_argument('--subject-position', type=float, nargs=3, default=[0, 0, 0], metavar=('X', 'Y', 'Z'))
+    parser.add_argument('--auto-place', action='store_true', help='Find nearby floor and unobstructed camera views in external scene')
     parser.add_argument('--subject-heading', type=float, default=0)
     parser.add_argument('--model-id', default='horse_statue_01')
     parser.add_argument('--hdri-id', default='abandoned_factory_canteen_01')

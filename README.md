@@ -579,3 +579,13 @@ dgs-scenes --provider polyhaven --max-download-mib 300 --root "$DGS_ROOT" --inse
 Barcelona Pavilion 原包可能缺少 `.blend` 引用的 `water bump.jpg`，但包含 `water-raindrop.jpg`。
 仅对 `pavillon_barcelone_v1.2.blend`，下载包内缺失的该贴图会替换为现有水波图，并打印 `[texture]`。
 这是一项水面凹凸细节替代，不保证与原始图相同；其他场景不会套用这个名称替代。
+
+
+### 外部场景灰白画面或主体 mask 全黑
+
+外部文件可能选中了带全局材质覆盖的渲染层。管线会清除当前层的 material_override，保留实际材质。
+如果世界原点不适合摆放，可显式增加 `dgs-render --auto-place`：在初始位置附近（XY 每步 4 单位、
+最大正负 32 单位）找朝上的支撑表面，并检查全部指定轨迹帧中相机到主体中心及近似边缘的遮挡。
+找到后打印 `[placement]`，实际坐标写入 render-report.json 的 subject_position。
+找不到则报错，仍可手动指定 subject-position。该检查不保证整个主体体积无碰撞或语义上合适；
+试渲染确认后，将实际坐标填入 catalog.scenes 的 position，再重新生成批量 plan。

@@ -11,6 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shots import shot_setup
 from texture_paths import TextureResolver
 from render_passes import make_render_layers
+from scene_placement import find_placement
+from trajectory import camera_angles as placement_angles
 import bpy
 from mathutils import Matrix, Vector
 
@@ -94,6 +96,9 @@ def main():
         obj.pass_index = 0
     bpy.context.scene.frame_set(1)
     scene = bpy.context.scene
+    if bpy.context.view_layer.material_override:
+        print(f'[scene] clearing material override: {bpy.context.view_layer.material_override.name}', flush=True)
+        bpy.context.view_layer.material_override = None
     scene.render.engine = 'CYCLES'
     scene.cycles.samples = cfg['samples']
     scene.cycles.use_denoising = True
@@ -190,6 +195,30 @@ def main():
     for obj in geometry: obj.pass_index = 1
     bpy.context.view_layer.update()
     target_height, effective_radius = shot_setup(cfg.get('subject_kind', 'object'), cfg.get('shot', 'manual'), size.z * scale, max(size.x, size.y) * scale, cfg['width'], cfg['height'], cfg['focal_mm'], cfg['radius'], cfg['elevation'], cfg['phi'], cfg.get('person_chest', 0.65), cfg.get('person_knee', 0.28))
+    if cfg.get('auto_place'):
+        if not cfg.get('scene'):
+            raise ValueError('--auto-place requires an external --scene')
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        def environment_raycast(origin, direction, distance):
+            origin, direction = Vector(origin), Vector(direction)
+            remaining = distance
+            for _ in range(128):
+                hit, point, normal, face, obj, matrix = scene.ray_cast(depsgraph, origin, direction, distance=remaining)
+                if not hit: return None
+                if obj.pass_index != 1 and not obj.hide_render:
+                    return tuple(point), tuple(normal)
+                traveled = (point - origin).length + 0.001
+                remaining -= traveled
+                if remaining <= 0: return None
+                origin = point + direction * 0.001
+            raise RuntimeError('Too many excluded surfaces during placement search')
+        search_angles = placement_angles(cfg['trajectory'], max(121, cfg['frames']), cfg['start_angle'],
+                                         cfg['elevation'], cfg['sweep'], cfg['theta'], cfg['phi'])
+        placement = Vector(find_placement(tuple(placement), target_height, effective_radius,
+                            search_angles, cfg['subject_size'], environment_raycast))
+        normalizer.location = placement - rotation @ (center * scale)
+        bpy.context.view_layer.update()
+        print(f'[placement] supported, unobstructed position: {list(placement)}', flush=True)
     target = placement + Vector((0, 0, target_height))
     framing = {'shot': cfg.get('shot', 'manual'), 'subject_kind': cfg.get('subject_kind', 'object'), 'target': list(target), 'effective_radius': effective_radius, 'method': 'bounding-box approximation; review anatomical framing'}
     print('[framing]', framing, flush=True)
