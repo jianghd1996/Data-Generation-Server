@@ -501,3 +501,34 @@ dgs-dataset run --plan "$DGS_ROOT/render-plan-scenes-v2.json" \
 `--all-combinations`仍按全部组合枚举，不启用随机替换。
 相机轨迹、近中远计算、主体参数和横竖屏不变；需要重新plan才能改变旧计划里的固定环境。
 检查第一批视频后，去掉limit运行全部。落脚点在catalog中修改后需重新生成计划。
+
+
+### 批量补充人物
+
+旧版默认人物下载只有一个新款 GLB。现在可以下载官方公开的新款 GLB 和经典静态 OBJ 包：
+
+```bash
+dgs-people --batch --root "$DGS_ROOT" --insecure
+dgs-dataset inventory --root "$DGS_ROOT"
+dgs-dataset check --catalog "$DGS_ROOT/catalog.json"
+```
+
+免费包不保证提供 11 个不同人物；不同格式、LOD、衣服配色不能当成不同人物。
+经典包的材质和导入需先渲染检查。单包失败不会阻止其他包；报告为 `people-batch-report.json`。
+重新运行会跳过校验通过的下载，并复用相同 ZIP 的解压结果。未完成下载沿用条件续传。
+
+从官方获取多个 ZIP 后，一次导入整个目录，保留贴图：
+
+```bash
+dgs-people --provider humano3d --archive-dir /path/to/authorized-zips --root "$DGS_ROOT"
+```
+
+也可使用 `--manifest configs/people.batch.json`，格式如下；archive 相对 JSON 所在目录解析。
+每个包必须有唯一 id，以及 url（真实 ZIP 下载链接）或 archive 二选一：
+
+```json
+{"assets": [{"id": "humano_pack_01", "provider": "humano3d", "archive": "downloads/people.zip", "source_url": "https://humano3d.com/", "license": "Vendor license; retain packaged terms"}]}
+```
+
+不会自动进行需要账户/结账的人物下载；使用已获取的链接或 ZIP。导入后重新 inventory/check，
+检查 catalog 的 identity/review，确认不同人物数量。下载包数量不等于人物数量。

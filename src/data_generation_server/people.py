@@ -50,6 +50,11 @@ def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Download Renderpeople sample or supplied Humano3D ZIP')
+    parser.add_argument('--batch', action='store_true', help='Download official new and classic posed packs')
+    parser.add_argument('--manifest', type=Path, help='Batch JSON: assets with id, provider, url or archive')
+    parser.add_argument('--archive-dir', type=Path, help='Import all ZIPs in a directory')
+    parser.add_argument('--source-url', help='Source page for supplied archives')
+    parser.add_argument('--license', default='Vendor license, not CC0')
     parser.add_argument('--provider', choices=['renderpeople', 'humano3d'], default='renderpeople')
     parser.add_argument('--id', help='Unique asset ID for an additional archive; avoids replacing prior samples')
     parser.add_argument('--url', help='Actual authorized ZIP download URL, not product page')
@@ -58,6 +63,10 @@ def main(argv=None):
     parser.add_argument('--insecure', action='store_true')
     parser.add_argument('--ca-bundle', type=Path)
     args = parser.parse_args(argv)
+    if args.batch or args.manifest or args.archive_dir:
+        if sum(bool(x) for x in (args.batch, args.manifest, args.archive_dir)) != 1 or args.url or args.archive or args.id:
+            parser.error('Choose one batch input; do not combine with --url/--archive/--id')
+        return batch(args)
     if args.url and args.archive:
         parser.error('Choose --url or --archive')
     if args.provider == 'humano3d' and not (args.url or args.archive):
@@ -66,6 +75,7 @@ def main(argv=None):
     asset_id = args.id or args.provider + '_free_posed'
     if not re.fullmatch(r'[A-Za-z0-9_-]+', asset_id):
         parser.error('--id must contain only letters, digits, underscores or hyphens')
+    source_url = args.source_url or ('https://renderpeople.com/free-3d-people/' if args.provider == 'renderpeople' else 'https://humano3d.com/free-sample/')
     folder = root / 'people' / 'direct' / asset_id
     if args.archive:
         archive = args.archive.resolve()
@@ -73,8 +83,8 @@ def main(argv=None):
     else:
         url = args.url or RENDERPEOPLE
         manifest = {'version': 1, 'assets': [{'provider': 'direct', 'kind': 'people', 'id': asset_id,
-            'source_url': 'https://renderpeople.com/free-3d-people/' if args.provider == 'renderpeople' else 'https://humano3d.com/free-sample/',
-            'license': 'Vendor license; see source website and terms packaged with download. Not CC0.',
+            'source_url': source_url,
+            'license': args.license,
             'files': [{'url': url, 'path': 'sample.zip'}]}]}
         with tempfile.TemporaryDirectory() as temporary:
             config = Path(temporary) / 'people.json'
@@ -84,13 +94,74 @@ def main(argv=None):
             if args.ca_bundle: flags.extend(['--ca-bundle', str(args.ca_bundle)])
             if assets_main(flags): return 1
         archive = folder / 'sample.zip'
-    models = unpack(archive, folder / 'extracted')
+    extracted = folder / 'extracted'
+    index = extracted / 'people-index.json'
+    previous = json.loads(index.read_text()) if index.exists() else {}
+    if previous.get('archive_sha256') == digest(archive, 'sha256') and previous.get('models') and all(safe_path(extracted, m).is_file() for m in previous['models']):
+        models = previous['models']
+        print(f'[skip] {asset_id}: already extracted')
+    else:
+        models = unpack(archive, extracted)
     write_json(folder / 'people-source.json', {'provider': args.provider, 'source_archive': str(archive),
-        'source_url': 'https://renderpeople.com/free-3d-people/' if args.provider == 'renderpeople' else 'https://humano3d.com/free-sample/',
-        'license': 'Vendor license, not CC0', 'archive_sha256': digest(archive, 'sha256')})
+        'source_url': source_url,
+        'license': args.license, 'archive_sha256': digest(archive, 'sha256')})
     print('Models ready for --model:')
     for model in models: print(folder / 'extracted' / model)
     return 0
+
+
+def batch(args):
+    if args.batch:
+        entries = [
+            {'id': 'renderpeople_free_posed', 'provider': 'renderpeople', 'url': RENDERPEOPLE},
+            {'id': 'renderpeople_classic_posed', 'provider': 'renderpeople',
+             'url': 'https://renderpeople.com/sample/free/renderpeople_free_posed_people_OBJ.zip'},
+        ]
+    elif args.manifest:
+        data = json.loads(args.manifest.read_text())
+        entries = data['assets']
+        for entry in entries:
+            if entry.get('archive'):
+                entry['archive'] = str((args.manifest.resolve().parent / entry['archive']).resolve())
+    else:
+        if not args.archive_dir.is_dir():
+            raise ValueError('Archive directory does not exist')
+        entries = [{'id': 'local_' + re.sub(r'[^A-Za-z0-9_-]', '_', path.stem),
+                    'provider': args.provider, 'archive': str(path.resolve())}
+                   for path in sorted(args.archive_dir.iterdir()) if path.suffix.lower() == '.zip']
+    if not entries:
+        raise ValueError('No people archives specified')
+    ids = [entry['id'] for entry in entries]
+    if len(ids) != len(set(ids)):
+        raise ValueError('Duplicate archive IDs; give each archive a unique ID')
+    for entry in entries:
+        if not re.fullmatch(r'[A-Za-z0-9_-]+', entry['id']):
+            raise ValueError('Invalid archive ID')
+        if bool(entry.get('url')) == bool(entry.get('archive')):
+            raise ValueError('Each entry needs exactly one URL or archive')
+        if entry.get('provider', args.provider) not in ('renderpeople', 'humano3d'):
+            raise ValueError('Unsupported provider')
+    results = []
+    root = args.root.resolve()
+    for entry in entries:
+        flags = ['--root', str(root), '--provider', entry.get('provider', args.provider), '--id', entry['id']]
+        for key in ('url', 'archive', 'source_url', 'license'):
+            if entry.get(key): flags.extend(['--' + key.replace('_', '-'), str(entry[key])])
+        if args.source_url and not entry.get('source_url'): flags.extend(['--source-url', args.source_url])
+        if not entry.get('license'): flags.extend(['--license', args.license])
+        if args.insecure: flags.append('--insecure')
+        if args.ca_bundle: flags.extend(['--ca-bundle', str(args.ca_bundle)])
+        try:
+            code = main(flags)
+            if code: raise RuntimeError('Archive download failed')
+            result = {'id': entry['id'], 'status': 'ok'}
+        except Exception as exc:
+            result = {'id': entry['id'], 'status': 'failed', 'error': str(exc)}
+            print(f"FAILED {entry['id']}: {exc}")
+        results.append(result)
+        write_json(root / 'people-batch-report.json', {'results': results, 'archive_count': len(entries)})
+    print('Run dgs-dataset inventory, then check; archive/model file counts are not unique person counts.')
+    return int(any(result['status'] == 'failed' for result in results))
 
 
 if __name__ == '__main__': raise SystemExit(main())
