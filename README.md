@@ -396,3 +396,18 @@ run 按顺序启动 Blender，每条任务GPU加载一次，避免同时抢显�
 - 这是包围盒近似，不是骨骼检测。手臂抬高、坐姿、道具、宽衣服可能改变包围盒，需你检查首帧及全过程。
 - 横竖屏按同样景别重新算距离，人物近中景裁切下半身是预期；远景保留你已验证的距离。
 - framing.target、effective_radius 写入 cameras.json 与 render-report.json，可检查实际距离；不同角度可能改变裁切边界。
+
+### 四卡并行
+
+```bash
+dgs-dataset run --plan dataset/render-plan.json \
+  --blender /mnt/DataPart/jianghongda/tools/blender-4.5.3-linux-x64/blender \
+  --gpus 0,1,2,3 --retry-incomplete
+```
+
+每卡一个 Blender 进程，独立设置 CUDA_VISIBLE_DEVICES；卡完成任务后从共享队列获取下一条。
+--limit 为所有卡合计的任务数量，不是每卡数量。默认不指定 --gpus 时保持原单进程行为。
+多卡模式的完整渲染日志保存到计划旁的 render-plan.run-report.logs/；终端显示任务开始/结束。
+run-report.json 记录每条任务的 gpu 和 log 路径。已完成且配置一致的任务仍跳过。
+并行提高批量吞吐，单条视频速度不承诺提高4倍；CPU、内存和磁盘也可能成为瓶颈。
+--gpus 指定物理编号，会覆盖子进程继承的 CUDA_VISIBLE_DEVICES，无需在命令前另外设置。

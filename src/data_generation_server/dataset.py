@@ -1,5 +1,9 @@
 """Inventory, review, expansion manifests, and resumable render job planning."""
 import argparse
+import concurrent.futures
+import os
+import queue
+import threading
 import hashlib
 import itertools
 import json
@@ -127,6 +131,59 @@ def job_complete(job, settings):
     except (ValueError, OSError): return False
 
 
+
+def run_jobs(plan, blender, report_path, gpus=None, limit=0, retry_incomplete=False):
+    outputs = [Path(job['output']).resolve() for job in plan['jobs']]
+    if len(outputs) != len(set(outputs)):
+        raise ValueError('Plan has duplicate output directories')
+    results, pending = [], []
+    for job in plan['jobs']:
+        if job_complete(job, plan['settings']):
+            results.append({'id': job['id'], 'status': 'skipped'})
+        elif not limit or len(pending) < limit:
+            pending.append(job)
+    tasks = queue.Queue()
+    for job in pending: tasks.put(job)
+    lock = threading.Lock()
+    logs = report_path.parent / (report_path.stem + '.logs')
+    if gpus: logs.mkdir(parents=True, exist_ok=True)
+    def worker(gpu):
+        while True:
+            try: job = tasks.get_nowait()
+            except queue.Empty: return
+            command = command_for(job, plan['settings'], blender, plan['root'])
+            if retry_incomplete: command.append('--overwrite')
+            env = os.environ.copy()
+            label = f'GPU {gpu}' if gpu is not None else 'default GPU'
+            if gpu is not None: env['CUDA_VISIBLE_DEVICES'] = str(gpu)
+            logfile = logs / (hashlib.sha256(job['id'].encode()).hexdigest()[:16] + '.log') if gpus else None
+            record = {'id': job['id'], 'gpu': gpu, 'log': str(logfile) if logfile else None}
+            print(f"[start {label}] {job['id']}" + (f' | log: {logfile}' if logfile else ''), flush=True)
+            try:
+                if logfile:
+                    with logfile.open('w') as stream:
+                        subprocess.run(command, check=True, env=env, stdout=stream, stderr=subprocess.STDOUT)
+                else:
+                    subprocess.run(command, check=True, env=env)
+                if not job_complete(job, plan['settings']): raise RuntimeError('Missing or mismatched success outputs')
+                record['status'] = 'ok'
+            except Exception as exc:
+                record.update(status='failed', error=str(exc))
+            with lock:
+                results.append(record)
+                write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
+                print(f"[{record['status']} {label}] {job['id']}", flush=True)
+    write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
+    if gpus:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
+            futures = [pool.submit(worker, gpu) for gpu in gpus]
+            for future in futures: future.result()
+    else:
+        worker(None)
+    write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
+    return 1 if any(item['status'] == 'failed' for item in results) else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Dataset coverage checks and render job orchestration')
     sub = parser.add_subparsers(dest='action', required=True)
@@ -145,6 +202,7 @@ def main(argv=None):
     run = sub.add_parser('run')
     run.add_argument('--plan', type=Path, required=True)
     run.add_argument('--blender', required=True)
+    run.add_argument('--gpus', help='Comma-separated physical GPU IDs, e.g. 0,1,2,3; one Blender job per GPU')
     run.add_argument('--limit', type=int, default=0, help='0 = all jobs; positive = next N jobs')
     run.add_argument('--retry-incomplete', action='store_true', help='Replace only pipeline outputs for incomplete/changed jobs')
     args = parser.parse_args(argv)
@@ -168,24 +226,13 @@ def main(argv=None):
     if args.limit < 0: parser.error('--limit must be >= 0')
     plan = json.loads(args.plan.read_text())
     report_path = args.plan.with_name(args.plan.stem + '.run-report.json')
-    results, attempted = [], 0
-    for job in plan['jobs']:
-        if job_complete(job, plan['settings']):
-            results.append({'id': job['id'], 'status': 'skipped'}); continue
-        if args.limit and attempted >= args.limit: break
-        command = command_for(job, plan['settings'], args.blender, plan['root'])
-        if args.retry_incomplete: command.append('--overwrite')
-        attempted += 1
-        try:
-            print(f"[{attempted}] {job['id']}", flush=True)
-            subprocess.run(command, check=True)
-            if not job_complete(job, plan['settings']): raise RuntimeError('Missing or mismatched success outputs')
-            results.append({'id': job['id'], 'status': 'ok'})
-        except Exception as exc:
-            results.append({'id': job['id'], 'status': 'failed', 'error': str(exc)})
-        write_json(report_path, {'results': results})
-    write_json(report_path, {'results': results})
-    return 1 if any(item['status'] == 'failed' for item in results) else 0
+    gpus = None
+    if args.gpus:
+        gpus = [item.strip() for item in args.gpus.split(',')]
+        if any(not item.isdigit() for item in gpus) or len(set(gpus)) != len(gpus):
+            parser.error('--gpus requires unique numeric GPU IDs, e.g. 0,1,2,3')
+    return run_jobs(plan, args.blender, report_path, gpus, args.limit, args.retry_incomplete)
+
 
 
 if __name__ == '__main__': raise SystemExit(main())

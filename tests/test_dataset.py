@@ -38,3 +38,28 @@ class DatasetTests(unittest.TestCase):
 
 
 if __name__ == '__main__': unittest.main()
+
+class MultiGpuTests(unittest.TestCase):
+    def test_gpu_isolation_and_queue(self):
+        from unittest.mock import patch
+        import threading
+        from data_generation_server.dataset import run_jobs
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = [{'id': str(i), 'output': str(root / str(i))} for i in range(8)]
+            plan = {'jobs': jobs, 'settings': {}, 'root': str(root)}
+            barrier = threading.Barrier(4)
+            seen, lock = [], threading.Lock()
+            def execute(command, **kwargs):
+                gpu = kwargs['env']['CUDA_VISIBLE_DEVICES']
+                with lock:
+                    first = gpu not in [item[0] for item in seen]
+                    seen.append((gpu, command[0]))
+                if first: barrier.wait(timeout=5)
+            def complete(job, settings):
+                with lock: return any(item[1] == job['id'] for item in seen)
+            with patch('data_generation_server.dataset.command_for', side_effect=lambda job, *args: [job['id']]), patch('data_generation_server.dataset.subprocess.run', side_effect=execute), patch('data_generation_server.dataset.job_complete', side_effect=complete):
+                self.assertEqual(run_jobs(plan, '/blender', root / 'report.json', ['0', '1', '2', '3']), 0)
+            self.assertEqual(len(seen), 8)
+            self.assertEqual({gpu for gpu, _ in seen}, {'0', '1', '2', '3'})
+            self.assertEqual(len({identity for _, identity in seen}), 8)
