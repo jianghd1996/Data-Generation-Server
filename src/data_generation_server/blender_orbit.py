@@ -10,6 +10,7 @@ import random
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from shots import shot_setup
 from texture_paths import TextureResolver
+from render_passes import make_render_layers
 import bpy
 from mathutils import Matrix, Vector
 
@@ -244,12 +245,10 @@ def main():
     camera.data.dof.use_dof = False
     scene.render.use_sequencer = False
     layer = bpy.context.view_layer
-    layer.use_pass_object_index = True
-    layer.use_pass_z = True
     scene.use_nodes = True
     tree = scene.node_tree
     tree.nodes.clear()
-    render = tree.nodes.new('CompositorNodeRLayers')
+    render = make_render_layers(scene, layer, tree)
     composite = tree.nodes.new('CompositorNodeComposite')
     tree.links.new(render.outputs['Image'], composite.inputs['Image'])
     mask = tree.nodes.new('CompositorNodeIDMask')
