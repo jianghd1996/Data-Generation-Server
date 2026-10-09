@@ -116,6 +116,8 @@ def download(spec, target):
                     expected = int(match[3])
                 else:
                     expected = int(response.headers['Content-Length']) if response.headers.get('Content-Length') else None
+                if spec.get('max_bytes') and expected is not None and expected > spec['max_bytes']:
+                    raise ValueError('Download exceeds configured size limit')
                 write_json(state, {'url': spec['url'], 'validator': response.headers.get('ETag') or response.headers.get('Last-Modified')})
                 total = spec.get('size') or expected
                 done = offset if resumed else 0
@@ -125,6 +127,8 @@ def download(spec, target):
                 show_progress(target, done, total, started, transferred)
                 with partial.open('ab' if resumed else 'wb') as out:
                     while block := (getattr(response, 'read1', response.read))(64 * 1024):
+                        if spec.get('max_bytes') and done + len(block) > spec['max_bytes']:
+                            raise ValueError('Download exceeds configured size limit')
                         out.write(block)
                         done += len(block)
                         transferred += len(block)

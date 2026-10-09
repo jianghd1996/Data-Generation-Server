@@ -19,6 +19,15 @@ class Response:
 
 
 class Tests(unittest.TestCase):
+    def test_download_size_limit_headers_and_stream(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'scene.zip'
+            for headers in ({'Content-Length': '10'}, {'ETag': 'v1'}):
+                with patch('data_generation_server.assets.request', side_effect=lambda *args: Response(b'0123456789', headers=headers)), patch('data_generation_server.assets.time.sleep'):
+                    with self.assertRaisesRegex(ValueError, 'size limit'):
+                        download({'url': 'https://example.org/scene.zip', 'max_bytes': 5}, target)
+                self.assertFalse(target.exists())
+
     def test_tls_options(self):
         import ssl
         import data_generation_server.assets as module

@@ -551,3 +551,26 @@ dgs-dataset inventory --root "$DGS_ROOT" --minimum 11
 
 骨骼人物是 A/T 等参考姿态，扫描优先选择 Z-up A-pose FBX，合并其他坐标轴/平台版本；
 渲染前检查材质及姿态，按需在 catalog 中禁用。新增包仍不保证达到 11 个不同人物素材。
+
+
+### 优先下载小场景
+
+新增 Blender 官方示例来源（Classroom 教室、Barcelona Pavilion 建筑），默认单包下载上限 150 MiB：
+
+```bash
+dgs-scenes --provider blender --root "$DGS_ROOT" --max-download-mib 150 --insecure
+dgs-dataset inventory --root "$DGS_ROOT" --minimum 11
+```
+
+下载前用一字节 Range 请求检查完整大小；超出上限或无法确认大小时失败，不下载完整包。
+下载器同时检查响应大小和写入字节数。Classroom 标注 CC0；Barcelona Pavilion 按来源 CC-BY
+记录作者，保留下载包条款。两个场景不能满足 11 个不同场景的目标。
+这些较早版本示例需要先在 Blender 4.x 试渲染，检查贴图、主体放置位置及相机是否碰墙。
+默认位置仍为世界原点；在 catalog.scenes 中调整 position 后重新 plan。
+本地环境访问 Blender 官方下载站返回 403，链接核实来自官方页面，下载需服务器或 Windows 实测。
+
+也可给原有 Poly Haven 下载加上限，避免下载 GiB 包：
+
+```bash
+dgs-scenes --provider polyhaven --max-download-mib 300 --root "$DGS_ROOT" --insecure
+```
