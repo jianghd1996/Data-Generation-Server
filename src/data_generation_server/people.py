@@ -12,32 +12,44 @@ from .assets import DEFAULT_ROOT, main as assets_main, digest, safe_path, write_
 RENDERPEOPLE = 'https://renderpeople.com/sample/free/rp_posed_00178_29_GLB.zip'
 
 
-def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 ** 3):
+def unpack(archive, folder, index_name='people-index.json', max_bytes=20 * 1024 ** 3, expand_nested=False):
     folder.parent.mkdir(parents=True, exist_ok=True)
     if folder.exists() and not (folder / index_name).exists():
         raise ValueError('Refusing to replace extraction directory without pipeline index')
     with tempfile.TemporaryDirectory(prefix='people-unpack-', dir=folder.parent) as temporary:
         staging = Path(temporary) / 'content'
         staging.mkdir()
-        with zipfile.ZipFile(archive) as zipped:
-            entries = zipped.infolist()
-            if sum(item.file_size for item in entries) > max_bytes:
-                raise ValueError('Archive exceeds configured extraction limit')
-            paths = []
-            for item in entries:
-                target = safe_path(staging, item.filename.rstrip('/'))
-                if stat.S_ISLNK(item.external_attr >> 16):
-                    raise ValueError('Archive symlinks are not supported')
-                if target in paths:
-                    raise ValueError('Duplicate archive paths')
-                paths.append(target)
-            for item, target in zip(entries, paths):
-                if item.is_dir():
-                    target.mkdir(parents=True, exist_ok=True)
-                    continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zipped.open(item) as source, target.open('wb') as destination:
-                    shutil.copyfileobj(source, destination)
+        queue = [(archive, staging, 0)]
+        expanded_bytes = 0
+        while queue:
+            current_archive, destination_root, depth = queue.pop(0)
+            with zipfile.ZipFile(current_archive) as zipped:
+                entries = zipped.infolist()
+                expanded_bytes += sum(item.file_size for item in entries)
+                if expanded_bytes > max_bytes:
+                    raise ValueError('Archive exceeds configured extraction limit (including nested ZIPs)')
+                paths = set()
+                for item in entries:
+                    target = safe_path(destination_root, item.filename.rstrip('/'))
+                    if stat.S_ISLNK(item.external_attr >> 16):
+                        raise ValueError('Archive symlinks are not supported')
+                    if target in paths or (target.exists() and not item.is_dir()):
+                        raise ValueError('Duplicate archive paths')
+                    paths.add(target)
+                    if item.is_dir():
+                        target.mkdir(parents=True, exist_ok=True)
+                        continue
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with zipped.open(item) as source, target.open('wb') as destination:
+                        shutil.copyfileobj(source, destination)
+                    if expand_nested and target.suffix.lower() == '.zip':
+                        if depth >= 4:
+                            raise ValueError('Nested ZIP depth exceeds 4')
+                        nested_root = target.with_name(target.name + '_unpacked')
+                        if nested_root.exists():
+                            raise ValueError('Nested ZIP output path already exists')
+                        nested_root.mkdir()
+                        queue.append((target, nested_root, depth + 1))
         models = [str(path.relative_to(staging)) for path in sorted(staging.rglob('*'))
                   if path.suffix.lower() in ('.glb', '.gltf', '.blend', '.fbx', '.obj')]
         if not models:
@@ -101,7 +113,7 @@ def main(argv=None):
         models = previous['models']
         print(f'[skip] {asset_id}: already extracted')
     else:
-        models = unpack(archive, extracted)
+        models = unpack(archive, extracted, expand_nested=True)
     write_json(folder / 'people-source.json', {'provider': args.provider, 'source_archive': str(archive),
         'source_url': source_url,
         'license': args.license, 'archive_sha256': digest(archive, 'sha256')})
@@ -160,7 +172,7 @@ def batch(args):
             print(f"FAILED {entry['id']}: {exc}")
         results.append(result)
         write_json(root / 'people-batch-report.json', {'results': results, 'archive_count': len(entries)})
-    print('Run dgs-dataset inventory, then check; archive/model file counts are not unique person counts.')
+    print('Run dgs-dataset inventory, ; archive/model file counts are not unique person counts.')
     return int(any(result['status'] == 'failed' for result in results))
 
 

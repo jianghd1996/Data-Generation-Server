@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -35,6 +36,29 @@ class PeopleTests(unittest.TestCase):
             timestamp = model.stat().st_mtime_ns
             self.assertEqual(main(args), 1)
             self.assertEqual(model.stat().st_mtime_ns, timestamp)
+
+    def test_nested_archive_models_and_security(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / 'outer.zip'
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, 'w') as zipped:
+                zipped.writestr('person/model.obj', b'mesh')
+                zipped.writestr('person/color.png', b'texture')
+            with zipfile.ZipFile(archive, 'w') as zipped:
+                zipped.writestr('person.zip', inner.getvalue())
+            self.assertEqual(unpack(archive, root / 'extracted', expand_nested=True),
+                             ['person.zip_unpacked/person/model.obj'])
+            inner = io.BytesIO()
+            with zipfile.ZipFile(inner, 'w') as zipped:
+                zipped.writestr('../escape.obj', b'mesh')
+            with zipfile.ZipFile(archive, 'w') as zipped:
+                zipped.writestr('bad.zip', inner.getvalue())
+            with self.assertRaises(ValueError):
+                unpack(archive, root / 'extracted', expand_nested=True)
+            self.assertTrue((root / 'extracted/person.zip_unpacked/person/model.obj').exists())
+            with self.assertRaises(ValueError):
+                unpack(archive, root / 'other', max_bytes=1, expand_nested=True)
 
     def test_path_traversal_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

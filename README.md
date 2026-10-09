@@ -510,7 +510,6 @@ dgs-dataset run --plan "$DGS_ROOT/render-plan-scenes-v2.json" \
 ```bash
 dgs-people --batch --root "$DGS_ROOT" --insecure
 dgs-dataset inventory --root "$DGS_ROOT"
-dgs-dataset check --catalog "$DGS_ROOT/catalog.json"
 ```
 
 免费包不保证提供 11 个不同人物；不同格式、LOD、衣服配色不能当成不同人物。
@@ -530,5 +529,7 @@ dgs-people --provider humano3d --archive-dir /path/to/authorized-zips --root "$D
 {"assets": [{"id": "humano_pack_01", "provider": "humano3d", "archive": "downloads/people.zip", "source_url": "https://humano3d.com/", "license": "Vendor license; retain packaged terms"}]}
 ```
 
-不会自动进行需要账户/结账的人物下载；使用已获取的链接或 ZIP。导入后重新 inventory/check，
+不会自动进行需要账户/结账的人物下载；使用已获取的链接或 ZIP。导入后重新 inventory，
 检查 catalog 的 identity/review，确认不同人物数量。下载包数量不等于人物数量。
+
+人物包支持最多四层内嵌 ZIP 自动展开，共享 20 GiB 解压上限；重跑批量命令会复用已下载的外层 ZIP。
