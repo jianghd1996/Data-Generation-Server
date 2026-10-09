@@ -11,6 +11,7 @@ from pathlib import Path
 import random
 import re
 import subprocess
+import shutil
 import sys
 from .assets import DEFAULT_ROOT, api, build_manifest, digest, safe_path, verify, write_json
 
@@ -146,6 +147,52 @@ def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=Fals
                          'no_video': True, 'no_save_scene': True}, 'jobs': jobs}
 
 
+def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None):
+    backgrounds = [entry for entry in catalog['backgrounds'] if entry.get('enabled', True) and Path(entry['path']).is_file()]
+    if not backgrounds: raise ValueError('No enabled backgrounds')
+    if not light_strengths or any(value <= 0 for value in light_strengths):
+        raise ValueError('Light strengths must be positive')
+    reduced = dict(catalog, backgrounds=[backgrounds[0]])
+    plan = plan_jobs(reduced, output, seed=seed, all_combinations=True)
+    plan['jobs'].sort(key=lambda job: 0 if job['kind'] == 'person' else 1)
+    for index, job in enumerate(plan['jobs']):
+        job['background'] = backgrounds[index % len(backgrounds)]
+        job['hdri_strength'] = light_strengths[index % len(light_strengths)]
+        job['auto_place'] = bool(job['scene'].get('path'))
+        identity = f"{job['kind']}_{job['subject']['id']}__{job['scene']['id']}__{job['background']['id']}__{job['shot']}__{job['orientation']}__{index:05d}"
+        job['id'] = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
+        job['output'] = str((output / job['id']).resolve())
+    plan['environment_sampling'] = 'subject-scene-grid; cyclic HDRI and light strength'
+    plan['subject_scene_pairs'] = len(plan['jobs']) // 6
+    plan['video_dir'] = str((video_dir or output.parent / 'videos').resolve())
+    plan['settings']['no_save_scene'] = True
+    return plan
+
+
+def collect_video(job, folder):
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    source = Path(job['output']) / 'video.mp4'
+    target = folder / (job['id'] + '.mp4')
+    if not source.is_file(): raise ValueError('Completed video missing')
+    if target.exists() and os.path.samefile(source, target): return str(target)
+    temporary = target.with_name(target.name + '.tmp')
+    temporary.unlink(missing_ok=True)
+    try:
+        os.link(source, temporary)
+    except OSError:
+        shutil.copy2(source, temporary)
+    temporary.replace(target)
+    return str(target)
+
+
+def write_video_index(plan, results):
+    if plan.get('video_dir'):
+        jobs = {job['id']: job for job in plan['jobs']}
+        write_json(Path(plan['video_dir']) / 'index.json',
+                   {'videos': [dict(job=jobs[item['id']], video=item['video']) for item in results if item.get('video')]})
+
+
 def command_for(job, settings, blender, root):
     subject, scene = job['subject'], job['scene']
     command = [sys.executable, '-m', 'data_generation_server.render', '--root', root, '--blender', blender,
@@ -157,6 +204,7 @@ def command_for(job, settings, blender, root):
         '--subject-position', *map(str, scene.get('position', [0, 0, 0]))]
     for key in ('frames', 'theta', 'phi', 'samples', 'radius'):
         command.extend(['--' + key, str(settings[key])])
+    if 'hdri_strength' in job: command.extend(['--hdri-strength', str(job['hdri_strength'])])
     if settings.get('no_video'): command.append('--no-video')
     if settings.get('no_save_scene'): command.append('--no-save-scene')
     if job.get('auto_place'): command.append('--auto-place')
@@ -185,20 +233,25 @@ def job_complete(job, settings):
                 and cfg.get('seed') == job['seed']
                 and cfg.get('scene') == job['scene'].get('path')
                 and cfg.get('scene_preset') == job['scene'].get('preset', 0)
+                and cfg.get('hdri_strength', 1.0) == job.get('hdri_strength', 1.0)
                 and cfg.get('auto_place', False) == job.get('auto_place', False)
                 and cfg.get('subject_position') == job['scene'].get('position', [0, 0, 0]))
     except (ValueError, OSError): return False
 
 
 
-def run_jobs(plan, blender, report_path, gpus=None, limit=0, retry_incomplete=False):
+def run_jobs(plan, blender, report_path, gpus=None, limit=0, retry_incomplete=False, workers_per_gpu=1):
+    if workers_per_gpu < 1: raise ValueError("workers_per_gpu must be positive")
+    if workers_per_gpu > 1 and not gpus: raise ValueError("Specify --gpus for multiple workers per GPU")
     outputs = [Path(job['output']).resolve() for job in plan['jobs']]
     if len(outputs) != len(set(outputs)):
         raise ValueError('Plan has duplicate output directories')
     results, pending = [], []
     for job in plan['jobs']:
         if job_complete(job, plan['settings']):
-            results.append({'id': job['id'], 'status': 'skipped'})
+            record = {'id': job['id'], 'status': 'skipped'}
+            if plan.get('video_dir'): record['video'] = collect_video(job, plan['video_dir'])
+            results.append(record)
         elif not limit or len(pending) < limit:
             pending.append(job)
     tasks = queue.Queue()
@@ -225,21 +278,24 @@ def run_jobs(plan, blender, report_path, gpus=None, limit=0, retry_incomplete=Fa
                 else:
                     subprocess.run(command, check=True, env=env)
                 if not job_complete(job, plan['settings']): raise RuntimeError('Missing or mismatched success outputs')
+                if plan.get('video_dir'): record['video'] = collect_video(job, plan['video_dir'])
                 record['status'] = 'ok'
             except Exception as exc:
                 record.update(status='failed', error=str(exc))
             with lock:
                 results.append(record)
+                write_video_index(plan, results)
                 write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
                 print(f"[{record['status']} {label}] {job['id']}", flush=True)
     write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
     if gpus:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(gpus)) as pool:
-            futures = [pool.submit(worker, gpu) for gpu in gpus]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(gpus) * workers_per_gpu) as pool:
+            futures = [pool.submit(worker, gpu) for gpu in gpus for _ in range(workers_per_gpu)]
             for future in futures: future.result()
     else:
         worker(None)
     write_json(report_path, {'results': results, 'gpus': gpus, 'scheduled': len(pending)})
+    write_video_index(plan, results)
     return 1 if any(item['status'] == 'failed' for item in results) else 0
 
 
@@ -260,6 +316,14 @@ def main(argv=None):
     plan.add_argument('--environment-sampling', choices=['per-video', 'per-combination'], default='per-video')
     plan.add_argument('--external-scenes-only', action='store_true')
     plan.add_argument('--approved-only', action='store_true')
+    grid = sub.add_parser('batch-plan')
+    grid.add_argument('--catalog', type=Path, required=True)
+    grid.add_argument('--output', type=Path, required=True)
+    grid.add_argument('--render-root', type=Path, required=True)
+    grid.add_argument('--video-dir', type=Path, required=True)
+    grid.add_argument('--samples', type=int, default=32)
+    grid.add_argument('--seed', type=int, default=42)
+    grid.add_argument('--light-strengths', type=float, nargs='+', default=[1.0])
     preview = sub.add_parser('preview')
     preview.add_argument('--catalog', type=Path, required=True)
     preview.add_argument('--output', type=Path, required=True, help='Preview plan JSON')
@@ -272,6 +336,7 @@ def main(argv=None):
     run.add_argument('--plan', type=Path, required=True)
     run.add_argument('--blender', required=True)
     run.add_argument('--gpus', help='Comma-separated physical GPU IDs, e.g. 0,1,2,3; one Blender job per GPU')
+    run.add_argument('--workers-per-gpu', type=int, default=1)
     run.add_argument('--limit', type=int, default=0, help='0 = all jobs; positive = next N jobs')
     run.add_argument('--retry-incomplete', action='store_true', help='Replace only pipeline outputs for incomplete/changed jobs')
     args = parser.parse_args(argv)
@@ -285,6 +350,14 @@ def main(argv=None):
         print(json.dumps(report, indent=2))
         print('Review/edit:', catalog_path)
         return 0 if report['quantity_ok'] else 1
+    if args.action == 'batch-plan':
+        if args.samples < 1: parser.error('--samples must be positive')
+        catalog = json.loads(args.catalog.read_text())
+        result = grid_plan(catalog, args.render_root, args.seed, args.light_strengths, args.video_dir)
+        result['settings']['samples'] = args.samples
+        write_json(args.output, result)
+        print(f"Planned {result['subject_scene_pairs']} subject-scene pairs, {len(result['jobs'])} videos; people first; videos: {result['video_dir']}")
+        return 0
     if args.action == 'preview':
         if args.samples < 1: parser.error('--samples must be positive')
         catalog = json.loads(args.catalog.read_text())
@@ -309,7 +382,7 @@ def main(argv=None):
         gpus = [item.strip() for item in args.gpus.split(',')]
         if any(not item.isdigit() for item in gpus) or len(set(gpus)) != len(gpus):
             parser.error('--gpus requires unique numeric GPU IDs, e.g. 0,1,2,3')
-    return run_jobs(plan, args.blender, report_path, gpus, args.limit, args.retry_incomplete)
+    return run_jobs(plan, args.blender, report_path, gpus, args.limit, args.retry_incomplete, args.workers_per_gpu)
 
 
 

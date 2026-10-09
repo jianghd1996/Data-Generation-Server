@@ -166,3 +166,52 @@ class CoveragePreviewTests(unittest.TestCase):
             self.assertEqual({job['scene']['id'] for job in plan['jobs']}, {f'scene{i}' for i in range(3)})
             self.assertEqual({job['background']['id'] for job in plan['jobs']}, {f'sky{i}' for i in range(5)})
             self.assertEqual(len({job['output'] for job in plan['jobs']}), 5)
+
+
+class GridBatchTests(unittest.TestCase):
+    def test_people_first_grid_size_and_background_light_cycles(self):
+        from data_generation_server.dataset import grid_plan
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'asset'; path.touch()
+            catalog = {'root': str(root), 'objects': [{'id': 'object', 'path': str(path)}],
+                       'people': [{'id': 'person', 'path': str(path)}],
+                       'scenes': [{'id': f'scene{i}', 'path': str(path)} for i in range(2)],
+                       'backgrounds': [{'id': f'sky{i}', 'path': str(path)} for i in range(3)]}
+            plan = grid_plan(catalog, root / 'renders', light_strengths=[.8, 1, 1.2], video_dir=root / 'videos')
+            self.assertEqual(plan['subject_scene_pairs'], 4)
+            self.assertEqual(len(plan['jobs']), 24)
+            self.assertEqual([j['kind'] for j in plan['jobs']], ['person']*12+['object']*12)
+            self.assertEqual([j['background']['id'] for j in plan['jobs'][:6]], ['sky0','sky1','sky2']*2)
+            self.assertEqual([j['hdri_strength'] for j in plan['jobs'][:6]], [.8,1,1.2]*2)
+            self.assertTrue(all(j['auto_place'] for j in plan['jobs']))
+            self.assertEqual(len({j['output'] for j in plan['jobs']}), 24)
+
+    def test_video_collection_and_updated_source(self):
+        from data_generation_server.dataset import collect_video
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / 'render'; output.mkdir()
+            source = output / 'video.mp4'; source.write_bytes(b'first')
+            job = {'id': 'person_scene_near', 'output': str(output)}
+            target = Path(collect_video(job, root / 'videos'))
+            self.assertEqual(target.read_bytes(), b'first')
+            source.unlink(); source.write_bytes(b'rendered-again')
+            collect_video(job, root / 'videos')
+            self.assertEqual(target.read_bytes(), b'rendered-again')
+
+    def test_two_workers_on_each_gpu(self):
+        from unittest.mock import patch
+        from data_generation_server.dataset import run_jobs
+        import threading
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            jobs = [{'id': str(i), 'output': str(root / str(i))} for i in range(4)]
+            plan = {'root': str(root), 'settings': {}, 'jobs': jobs}
+            barrier, lock, seen = threading.Barrier(4), threading.Lock(), []
+            def execute(command, **kwargs):
+                with lock: seen.append((command[0], kwargs['env']['CUDA_VISIBLE_DEVICES']))
+                barrier.wait(timeout=5)
+            with patch('data_generation_server.dataset.command_for', side_effect=lambda job,*args: [job['id']]), patch('data_generation_server.dataset.subprocess.run', side_effect=execute), patch('data_generation_server.dataset.job_complete', side_effect=lambda job,*args: any(item[0] == job['id'] for item in seen)):
+                self.assertEqual(run_jobs(plan, '/blender', root / 'report.json', ['0','1'], workers_per_gpu=2), 0)
+            self.assertEqual(sorted(gpu for _,gpu in seen), ['0','0','1','1'])

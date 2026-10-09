@@ -612,3 +612,22 @@ run 重复执行会跳过完成项；失败详情在 preview-plan.run-report.jso
 `renders/asset-previews/index.html` 是静态分页检查页，支持主体搜索、场景/背景筛选，每页 48 项，
 RGB 图、mask 和报告链接。下载整个预览目录后可在 Windows 浏览器打开 index.html。
 渲染过程中可刷新检查页查看新增结果，未生成与失败项显示“待生成或失败”，以批次报告为准。
+
+
+### 人物优先的 8 字批量视频
+
+每个启用主体（人物优先，随后物体）× 每个启用场景作为一对，近/中/远 × 横/竖屏各生成一条视频。
+总视频数 = (人物数 + 物体数) × 场景数 × 6。每条 121 帧、720P、theta=30、phi=5。
+背景/HDRI 按 catalog 顺序循环，每条视频选下一个；HDRI 同时提供环境照明。
+光照强度默认 1.0，可用 --light-strengths 给出顺序循环列表。外部场景自动找支撑和无遮挡位置。
+
+```bash
+dgs-dataset batch-plan --catalog "$DGS_ROOT/catalog.json" --output "$DGS_ROOT/figure8-plan.json" --render-root "$DGS_ROOT/renders/figure8-batch" --video-dir "$DGS_ROOT/videos/figure8-batch" --light-strengths 0.8 1.0 1.2 --samples 32
+dgs-dataset run --plan "$DGS_ROOT/figure8-plan.json" --blender "$DGS_BLENDER" --gpus 0,1,2,3 --workers-per-gpu 2 --retry-incomplete
+```
+
+每张卡两个独立 Blender 进程，总并发八个。默认仍为每卡一个，可按实际吞吐/内存调整 workers-per-gpu。
+人物先出队启动；队列末尾人物与开头物体可能同时运行。失败不阻断剩余任务，重复执行跳过完成项。
+每条成功 video.mp4 立即以组合唯一名称汇总到 video-dir，同文件系统优先硬链接，否则复制；
+index.json 记录组合、光照、原始输出路径和汇总路径。重跑也会补齐已完成任务的汇总文件。
+批量视频不另存完整 scene.blend，RGB/mask/depth/相机参数和报告仍在各任务目录中。
