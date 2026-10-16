@@ -2,12 +2,14 @@
 import math
 
 
-def find_placement(start, target_height, radius, angles, subject_size, raycast, step=4, rings=8):
+def find_placement(start, target_height, radius, angles, subject_size, raycast, step=4, rings=8, candidate_index=0):
     """raycast(origin, direction, distance) returns (hit point, normal), or None.
 
     Caller excludes the subject and non-rendering geometry. This checks floor support
     and center/edge visibility, not full camera-volume collision or semantic placement.
     """
+    if candidate_index < 0: raise ValueError('candidate_index must be nonnegative')
+    found = 0
     offsets = sorted(((x, y) for x in range(-rings, rings + 1) for y in range(-rings, rings + 1)),
                      key=lambda p: (p[0] ** 2 + p[1] ** 2, p))
     unique_angles = sorted(set(tuple(angle) for angle in angles))
@@ -33,5 +35,7 @@ def find_placement(start, target_height, radius, angles, subject_size, raycast, 
                     clear = False
                     break
             if not clear: break
-        if clear: return position
-    raise ValueError('No supported, unobstructed placement found within 32 scene units; choose --subject-position manually')
+        if clear:
+            if found == candidate_index: return position
+            found += 1
+    raise ValueError('No supported candidate at requested index in search grid; choose --subject-position manually')
