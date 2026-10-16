@@ -215,7 +215,7 @@ def main():
         search_angles = placement_angles(cfg['trajectory'], max(121, cfg['frames']), cfg['start_angle'],
                                          cfg['elevation'], cfg['sweep'], cfg['theta'], cfg['phi'])
         placement = Vector(find_placement(tuple(placement), target_height, effective_radius,
-                            search_angles, cfg['subject_size'], environment_raycast))
+                            search_angles, cfg['subject_size'], environment_raycast, candidate_index=cfg.get('placement_index', 0)))
         normalizer.location = placement - rotation @ (center * scale)
         bpy.context.view_layer.update()
         print(f'[placement] supported, unobstructed position: {list(placement)}', flush=True)
