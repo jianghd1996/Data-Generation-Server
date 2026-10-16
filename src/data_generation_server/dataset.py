@@ -24,7 +24,7 @@ def inventory(root, previous=None):
     def add(category, entry):
         prior = old[category].get(entry['id']) or next((item for item in old[category].values() if entry.get('path') and item.get('path') == entry['path']), {})
         entry.update({key: value for key, value in prior.items()
-                      if key in ('enabled', 'review', 'notes', 'heading', 'position', 'size', 'chest', 'knee', 'identity')})
+                      if key in ('enabled', 'review', 'notes', 'heading', 'position', 'size', 'chest', 'knee', 'identity', 'auto_place')})
         if category == 'scenes' and 'preset' in entry:
             entry['identity'] = 'procedural_courtyard'
             entry['enabled'] = False
@@ -142,7 +142,7 @@ def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=Fals
         job_id = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
         jobs.append({'id': job_id, 'kind': kind, 'subject': subject, 'scene': scene, 'background': background,
                      'shot': 'far', 'orientation': 'landscape', 'seed': seed,
-                     'auto_place': bool(scene.get('path')), 'output': str((output / job_id).resolve())})
+                     'auto_place': scene.get('auto_place', bool(scene.get('path'))), 'output': str((output / job_id).resolve())})
     return {'version': 1, 'root': catalog['root'], 'preview': True,
             'environment_sampling': 'all-combinations' if all_combinations else 'coverage',
             'settings': {'frames': 1, 'theta': 30, 'phi': 5, 'samples': samples, 'radius': 4.5,
@@ -160,7 +160,7 @@ def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None):
     for index, job in enumerate(plan['jobs']):
         job['background'] = backgrounds[index % len(backgrounds)]
         job['hdri_strength'] = light_strengths[index % len(light_strengths)]
-        job['auto_place'] = bool(job['scene'].get('path'))
+        job['auto_place'] = job['scene'].get('auto_place', bool(job['scene'].get('path')))
         identity = f"{job['kind']}_{job['subject']['id']}__{job['scene']['id']}__{job['background']['id']}__{job['shot']}__{job['orientation']}__{index:05d}"
         job['id'] = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
         job['output'] = str((output / job['id']).resolve())
