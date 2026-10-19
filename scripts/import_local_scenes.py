@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Organize uploaded .blend scenes, preserve originals, and render 11-view checks.
+"""Organize uploads and preview every enabled, ready catalog scene in one gallery.
 Default source: dataset/scenes/blenderkit. After ALL imports succeed, archive the
 whole upload tree (including textures) to dataset/scene-sources/blenderkit-TIME.
 Failed imports leave the upload tree untouched. Successful packed scenes live
 in dataset/scenes/direct/local_NAME_HASH/environment.blend. Never permanently
-deletes source assets. Re-run resumes the saved import report and valid renders.
+deletes source assets. Saved fixed positions are respected. Existing compatible
+previews (including shorter checks) are reused; new renders default to 11 views.
 """
 import argparse
 import concurrent.futures
@@ -65,18 +66,20 @@ def import_one(source,root,blender):
         'notes':'Locally uploaded scene; dependencies checked and packed. Preview before production.'}
     if registration.exists():
         old=json.loads(registration.read_text())
-        record.update({key:old[key] for key in ('position','enabled','review','notes') if key in old})
+        record.update({key:old[key] for key in ('position','enabled','review','notes','auto_place') if key in old})
     write_json(registration,record)
     return record
 
 
 def render_command(scene,args,output):
     cmd=[sys.executable,'-m','data_generation_server.render','--root',str(args.root),
-        '--scene',scene['path'],'--auto-place','--model-id',args.model_id,
+        '--scene',scene['path'],'--model-id',args.model_id,
         '--blender',args.blender,'--frames',str(args.frames),'--width','1280','--height','720',
         '--orientation','landscape','--samples',str(args.samples),'--no-video',
         '--no-save-scene','--output',str(output),'--overwrite']
     # No --hdri: standalone external scenes keep their own world lighting.
+    cmd.extend(['--subject-position', *map(str,scene.get('position',[0,0,0]))])
+    if scene.get('auto_place',True): cmd.append('--auto-place')
     return cmd
 
 
@@ -84,23 +87,69 @@ def complete(output,args,scene):
     try:
         success=json.loads((output/'SUCCESS.json').read_text())
         config=json.loads((output/'render-config.json').read_text())
-        stamp=json.loads((output/'local-scene-check.json').read_text())
-        return (success.get('frames')==args.frames and config.get('samples')==args.samples
+        stamp_path=output/'local-scene-check.json'
+        if stamp_path.exists():
+            if json.loads(stamp_path.read_text()).get('blend_sha256')!=scene['blend_sha256']:return False
+        elif Path(scene['path']).stat().st_mtime > (output/'render-config.json').stat().st_mtime:
+            return False
+        if scene.get('auto_place',True):
+            if not config.get('auto_place'):return False
+            if config.get('placement_index',0)!=0:return False
+            if config.get('subject_position',[0,0,0])!=scene.get('position',[0,0,0]):return False
+        else:
+            rp=output/'render-report.json'
+            actual=json.loads(rp.read_text()).get('subject_position') if rp.exists() else config.get('subject_position')
+            if not actual or any(abs(float(x)-float(y))>1e-4 for x,y in zip(actual,scene.get('position',[0,0,0]))):return False
+        frames=success.get('frames',0)
+        return (isinstance(frames,int) and frames>0 and config.get('samples')==args.samples
+            and config.get('width')==1280 and config.get('height')==720
+            and config.get('hdri') is None
+            and config.get('shot','manual')=='manual'
             and config.get('scene')==scene['path'] and config.get('model_id')==args.model_id
-            and stamp.get('blend_sha256')==scene['blend_sha256']
             and all((output/'rgb'/('rgb_%04d.png'%i)).is_file()
-                    and (output/'mask'/('mask_%04d.png'%i)).is_file() for i in range(1,args.frames+1)))
-    except (OSError,ValueError):return False
+                    and (output/'mask'/('mask_%04d.png'%i)).is_file() for i in range(1,frames+1)))
+    except (OSError,ValueError,KeyError,TypeError):return False
+
+
+def reuse_preview(source,destination):
+    def copy(src,dst):
+        try:os.link(src,dst)
+        except OSError:shutil.copy2(src,dst)
+    for name in ('rgb','mask','depth','SUCCESS.json','render-config.json','render-report.json',
+                 'local-scene-check.json','cameras.json','image.jpg','prompt.txt','render.log'):
+        src=source/name;dst=destination/name
+        if not src.exists():continue
+        if dst.is_dir():shutil.rmtree(dst)
+        elif dst.exists():dst.unlink()
+        if src.is_dir():shutil.copytree(src,dst,copy_function=copy)
+        else:copy(src,dst)
+
+
+def current_scenes(catalog,root):
+    scenes=[];seen_paths=set();seen_identities=set()
+    for item in catalog.get('scenes',[]):
+        if not item.get('enabled',True) or not item.get('path'):continue
+        path=Path(item['path']).resolve()
+        if (not path.is_file() or path.is_relative_to(root/'scene-sources')
+                or path.is_relative_to(root/'scenes/blenderkit')):continue
+        identity=item.get('identity',str(path))
+        if str(path) in seen_paths or identity in seen_identities:continue
+        seen_paths.add(str(path));seen_identities.add(identity)
+        record=dict(item,path=str(path),blend_sha256=digest(path,'sha256'))
+        # IDs may contain spaces; use a separate safe output component only then.
+        record['output_id']=item['id'] if re.fullmatch(r'[A-Za-z0-9_-]+',item['id']) else re.sub(r'[^A-Za-z0-9_-]','_',item['id'])+'_'+hashlib.sha256(item['id'].encode()).hexdigest()[:8]
+        scenes.append(record)
+    return scenes
 
 
 def gallery(folder,results,frames):
     cards=[]
     for item in sorted(results,key=lambda x:x['name']):
-        uid=item['id'];status=item['status']
+        uid=item.get('output_id',item['id']);status=item['status']
         images=''.join('<a href="{0}/rgb/rgb_{1:04d}.png"><img loading="lazy" width="240" src="{0}/rgb/rgb_{1:04d}.png"></a>'.format(html.escape(uid),i)
-            for i in range(1,frames+1)) if status in ('ok','skipped') else ''
+            for i in range(1,item.get('frames',frames)+1)) if status in ('ok','skipped') else ''
         cards.append('<section><h2>'+html.escape(item['name'])+' — '+html.escape(status)+'</h2><p>'+html.escape(item.get('error',''))+'</p><a href="'+html.escape(uid)+'/render.log">render log</a> | <a href="'+html.escape(uid)+'/mask/">masks</a><div>'+images+'</div></section>')
-    (folder/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Uploaded scene checks</title><style>body{font:16px sans-serif;margin:24px;background:#eee}section{background:white;padding:16px;margin:16px 0}img{margin:4px}a{color:#246}</style><h1>Uploaded scene checks</h1><p>11 frames sample the trajectory keypoints; repeated center views are expected. Inspect RGB, masks, scale and lighting.</p>'+''.join(cards),encoding='utf-8')
+    (folder/'index.html').write_text('<!doctype html><meta charset="utf-8"><title>Scene checks</title><style>body{font:16px sans-serif;margin:24px;background:#eee}section{background:white;padding:16px;margin:16px 0}img{margin:4px}a{color:#246}</style><h1>Current scene checks</h1><p>Existing valid previews are reused. Inspect RGB, masks, scale and lighting.</p>'+''.join(cards),encoding='utf-8')
 
 
 def main(argv=None):
@@ -152,10 +201,11 @@ def main(argv=None):
         for record in imported.values():
             old=Path(record.get('source_original',''))
             if old.is_relative_to(source) and (backup/old.relative_to(source)).is_file():
+                registration=Path(record['path']).parent/'scene-registration.json'
+                if registration.exists():record.update(json.loads(registration.read_text()))
                 record['source_archive']=str(backup/old.relative_to(source))
                 write_json(Path(record['path']).parent/'scene-registration.json',record)
     write_json(report_path,{'scenes':list(imported.values()),'failures':failed})
-    if not imported:p.error('No imported scenes; check upload path and import logs')
     # Only rebuild full inventory after successful archival: raw failed files must not
     # accidentally become additional enabled scene entries.
     if not failed:
@@ -164,16 +214,35 @@ def main(argv=None):
         prior=json.loads(cp.read_text()) if cp.exists() else None
         write_json(cp,inventory(a.root,prior))
     if a.import_only:return int(bool(failed))
+    cp=a.root/'catalog.json'
+    catalog=json.loads(cp.read_text()) if cp.exists() else {'scenes':list(imported.values())}
+    scenes=current_scenes(catalog,a.root)
+    if not scenes:p.error('No enabled ready scenes in catalog; check import logs and inventory')
     output=a.root/'renders/local-scene-checks';output.mkdir(parents=True,exist_ok=True)
+    previous_outputs={}
+    for config_path in (a.root/'renders').rglob('render-config.json'):
+        if config_path.parent.is_relative_to(output):continue
+        try:
+            cfg=json.loads(config_path.read_text())
+            if cfg.get('scene'):previous_outputs.setdefault(cfg['scene'],[]).append(config_path.parent)
+        except (ValueError,OSError):pass
     jobs=queue.Queue()
-    for record in imported.values():jobs.put(record)
+    for record in scenes:jobs.put(record)
+    print('[preview]',len(scenes),'current scenes ->',output,flush=True)
     results=[];lock=threading.Lock()
     def worker(gpu):
         while True:
             try:scene=jobs.get_nowait()
             except queue.Empty:return
-            folder=output/scene['id'];folder.mkdir(parents=True,exist_ok=True)
-            item={'id':scene['id'],'name':scene.get('name',scene['id']),'gpu':gpu,'output':str(folder)}
+            folder=output/scene['output_id'];folder.mkdir(parents=True,exist_ok=True)
+            item={'id':scene['id'],'output_id':scene['output_id'],'name':scene.get('name',scene['id']),'gpu':gpu,'output':str(folder),
+                  'placement_mode':'auto' if scene.get('auto_place',True) else 'fixed', 'position':scene.get('position',[0,0,0])}
+            if not complete(folder,a,scene):
+                for prior in previous_outputs.get(scene['path'],[]):
+                    if complete(prior,a,scene):
+                        reuse_preview(prior,folder)
+                        item['reused_from']=str(prior)
+                        break
             if complete(folder,a,scene):item['status']='skipped'
             else:
                 print('[render GPU '+gpu+']',item['name'],flush=True)
@@ -186,6 +255,8 @@ def main(argv=None):
                     item['status']='ok'
                 except Exception as exc:item.update(status='failed',error=str(exc))
             with lock:
+                if item['status'] in ('ok','skipped'):
+                    item['frames']=json.loads((folder/'SUCCESS.json').read_text())['frames']
                 results.append(item)
                 write_json(output/'report.json',{'results':results,'import_failures':failed})
                 gallery(output,results,a.frames)
