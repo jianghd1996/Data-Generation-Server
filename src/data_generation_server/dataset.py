@@ -202,12 +202,14 @@ def write_video_index(plan, results):
 def command_for(job, settings, blender, root):
     subject, scene = job['subject'], job['scene']
     command = [sys.executable, '-m', 'data_generation_server.render', '--root', root, '--blender', blender,
-        '--model', subject['path'], '--hdri', job['background']['path'], '--subject-kind', job['kind'],
+        '--model', subject['path'], '--subject-kind', job['kind'],
         '--shot', job['shot'], '--orientation', job['orientation'], '--trajectory', 'figure8',
         '--width', '1280', '--height', '720', '--output', job['output'], '--seed', str(job['seed']),
         '--subject-heading', str(subject.get('heading', 0)), '--subject-size', str(subject.get('size', 2)),
         '--person-chest', str(subject.get('chest', 0.65)), '--person-knee', str(subject.get('knee', 0.28)),
         '--subject-position', *map(str, scene.get('position', [0, 0, 0]))]
+    if job['background'].get('path'):
+        command.extend(['--hdri',job['background']['path']])
     for key in ('frames', 'theta', 'phi', 'samples', 'radius'):
         command.extend(['--' + key, str(settings[key])])
     if 'hdri_strength' in job: command.extend(['--hdri-strength', str(job['hdri_strength'])])
