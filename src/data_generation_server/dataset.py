@@ -27,8 +27,9 @@ def inventory(root, previous=None):
                       if key in ('enabled', 'review', 'notes', 'heading', 'position', 'size', 'chest', 'knee', 'identity', 'auto_place')})
         if category == 'scenes' and 'preset' in entry:
             entry['identity'] = 'procedural_courtyard'
-            entry['enabled'] = False
-            entry['notes'] = 'Disabled: repeated courtyard geometry; use distinct downloaded scenes.'
+            entry['enabled'] = entry['id'] == 'courtyard_00'
+            entry['notes'] = ('Single retained procedural courtyard layout.' if entry['enabled']
+                              else 'Disabled: duplicate courtyard layout variant.')
         entry.setdefault('enabled', True)
         entry.setdefault('review', 'pending')
         catalog[category].append(entry)
