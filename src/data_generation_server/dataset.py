@@ -153,15 +153,22 @@ def preview_jobs(catalog, output, seed=42, samples=16, external_scenes_only=Fals
                          'no_video': True, 'no_save_scene': True}, 'jobs': jobs}
 
 
-def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None):
+def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None, scene_sampling='grid'):
+    if scene_sampling not in ('grid','per-video'): raise ValueError('Unknown scene sampling mode')
     backgrounds = [entry for entry in catalog['backgrounds'] if entry.get('enabled', True) and Path(entry['path']).is_file()]
     if not backgrounds: raise ValueError('No enabled backgrounds')
     if not light_strengths or any(value <= 0 for value in light_strengths):
         raise ValueError('Light strengths must be positive')
     reduced = dict(catalog, backgrounds=[backgrounds[0]])
+    scenes = [scene for scene in catalog['scenes'] if scene.get('enabled',True)
+              and (not scene.get('path') or Path(scene['path']).is_file())]
+    if not scenes: raise ValueError('No enabled scenes')
+    if scene_sampling == 'per-video': reduced['scenes'] = [scenes[0]]
     plan = plan_jobs(reduced, output, seed=seed, all_combinations=True)
     plan['jobs'].sort(key=lambda job: 0 if job['kind'] == 'person' else 1)
+    rng = random.Random(seed)
     for index, job in enumerate(plan['jobs']):
+        if scene_sampling == 'per-video': job['scene'] = rng.choice(scenes)
         job['background'] = backgrounds[index % len(backgrounds)]
         job['hdri_strength'] = light_strengths[index % len(light_strengths)]
         if job['scene'].get('path'):
@@ -170,8 +177,9 @@ def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None):
         identity = f"{job['kind']}_{job['subject']['id']}__{job['scene']['id']}__{job['background']['id']}__{job['shot']}__{job['orientation']}__{index:05d}"
         job['id'] = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
         job['output'] = str((output / job['id']).resolve())
-    plan['environment_sampling'] = 'subject-scene-grid; external scene worlds preserved; cyclic HDRI for procedural scenes'
+    plan['environment_sampling'] = ('random-scene-per-video' if scene_sampling == 'per-video' else 'subject-scene-grid') + '; external scene worlds preserved; cyclic HDRI for procedural scenes'
     plan['subject_scene_pairs'] = len(plan['jobs']) // 6
+    plan['scene_sampling'] = scene_sampling
     plan['video_dir'] = str((video_dir or output.parent / 'videos').resolve())
     plan['settings']['no_save_scene'] = True
     return plan
@@ -334,6 +342,8 @@ def main(argv=None):
     grid.add_argument('--samples', type=int, default=32)
     grid.add_argument('--seed', type=int, default=42)
     grid.add_argument('--light-strengths', type=float, nargs='+', default=[1.0])
+    grid.add_argument('--scene-sampling', choices=['grid','per-video'], default='grid',
+                      help='per-video: six videos per subject, independently sample a scene for each video')
     preview = sub.add_parser('preview')
     preview.add_argument('--catalog', type=Path, required=True)
     preview.add_argument('--output', type=Path, required=True, help='Preview plan JSON')
@@ -363,10 +373,11 @@ def main(argv=None):
     if args.action == 'batch-plan':
         if args.samples < 1: parser.error('--samples must be positive')
         catalog = json.loads(args.catalog.read_text())
-        result = grid_plan(catalog, args.render_root, args.seed, args.light_strengths, args.video_dir)
+        result = grid_plan(catalog, args.render_root, args.seed, args.light_strengths, args.video_dir, args.scene_sampling)
         result['settings']['samples'] = args.samples
         write_json(args.output, result)
-        print(f"Planned {result['subject_scene_pairs']} subject-scene pairs, {len(result['jobs'])} videos; people first; videos: {result['video_dir']}")
+        label = 'subjects' if args.scene_sampling == 'per-video' else 'subject-scene pairs'
+        print(f"Planned {result['subject_scene_pairs']} {label}, {len(result['jobs'])} videos; scene sampling={args.scene_sampling}; people first; videos: {result['video_dir']}")
         return 0
     if args.action == 'preview':
         if args.samples < 1: parser.error('--samples must be positive')
