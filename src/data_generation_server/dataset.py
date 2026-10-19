@@ -164,11 +164,13 @@ def grid_plan(catalog, output, seed=42, light_strengths=(1.0,), video_dir=None):
     for index, job in enumerate(plan['jobs']):
         job['background'] = backgrounds[index % len(backgrounds)]
         job['hdri_strength'] = light_strengths[index % len(light_strengths)]
+        if job['scene'].get('path'):
+            job['background'] = {'id': 'scene_world', 'path': None}
         job['auto_place'] = job['scene'].get('auto_place', bool(job['scene'].get('path')))
         identity = f"{job['kind']}_{job['subject']['id']}__{job['scene']['id']}__{job['background']['id']}__{job['shot']}__{job['orientation']}__{index:05d}"
         job['id'] = re.sub(r'[^a-zA-Z0-9_.-]', '_', identity)
         job['output'] = str((output / job['id']).resolve())
-    plan['environment_sampling'] = 'subject-scene-grid; cyclic HDRI and light strength'
+    plan['environment_sampling'] = 'subject-scene-grid; external scene worlds preserved; cyclic HDRI for procedural scenes'
     plan['subject_scene_pairs'] = len(plan['jobs']) // 6
     plan['video_dir'] = str((video_dir or output.parent / 'videos').resolve())
     plan['settings']['no_save_scene'] = True
