@@ -36,4 +36,4 @@ class CandidateTests(unittest.TestCase):
             result=inventory(Path(t),old)
             courtyards=[s for s in result['scenes'] if s['identity']=='procedural_courtyard']
             self.assertEqual(len(courtyards),12)
-            self.assertTrue(all(not s['enabled'] for s in courtyards))
+            self.assertEqual([s['id'] for s in courtyards if s['enabled']],['courtyard_00'])
