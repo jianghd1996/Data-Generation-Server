@@ -182,7 +182,7 @@ class GridBatchTests(unittest.TestCase):
             self.assertEqual(plan['subject_scene_pairs'], 4)
             self.assertEqual(len(plan['jobs']), 24)
             self.assertEqual([j['kind'] for j in plan['jobs']], ['person']*12+['object']*12)
-            self.assertEqual([j['background']['id'] for j in plan['jobs'][:6]], ['sky0','sky1','sky2']*2)
+            self.assertTrue(all(j['background'] == {'id':'scene_world','path':None} for j in plan['jobs']))
             self.assertEqual([j['hdri_strength'] for j in plan['jobs'][:6]], [.8,1,1.2]*2)
             self.assertTrue(all(j['auto_place'] for j in plan['jobs']))
             self.assertEqual(len({j['output'] for j in plan['jobs']}), 24)
