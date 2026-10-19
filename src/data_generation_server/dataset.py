@@ -50,6 +50,8 @@ def inventory(root, previous=None):
         files = sorted((p for p in (root / directory).rglob('*') if p.suffix.lower() in suffixes), key=lambda p: (EXTENSIONS.get(p.suffix.lower(), 0), 0 if p.stem.lower().endswith('_zup_a') else 1, str(p)))
         for path in files:
             if category == 'scenes':
+                # Upload staging contains originals, not production scene entries.
+                if path.resolve().is_relative_to((root / 'scenes/blenderkit').resolve()): continue
                 if str(path.resolve()) in registered_scene_paths : continue
                 # A registered archive contributes only its selected main scene, not its asset blends.
                 if any(parent.joinpath('scene-registration.json').exists() for parent in path.parents if root in parent.parents): continue
@@ -75,6 +77,7 @@ def inventory(root, previous=None):
         for identifier, entry in old[category].items():
             managed_directory = root / {'objects': 'models', 'people': 'people', 'scenes': 'scenes', 'backgrounds': 'hdris'}[category]
             external_path = Path(entry['path']).resolve() if entry.get('path') else None
+            if category == 'scenes' and external_path and external_path.is_relative_to((root / 'scene-sources').resolve()): continue
             if identifier not in discovered and external_path and not external_path.is_relative_to(managed_directory.resolve()) and external_path.is_file() and not any(item.get('path') == entry['path'] for item in catalog[category]):
                 catalog[category].append(entry)
     return catalog
