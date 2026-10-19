@@ -33,7 +33,7 @@ class LocalSceneTests(unittest.TestCase):
             root=Path(t);source=root/'scenes/blenderkit';source.mkdir(parents=True)
             original=source/'bad.blend';original.write_bytes(b'bad')
             with patch.object(m.shutil,'which',return_value='/bin/blender'),patch.object(m.subprocess,'run',side_effect=RuntimeError('Missing texture')):
-                with self.assertRaises(SystemExit):m.main(['--root',str(root),'--blender','blender','--import-only'])
+                self.assertEqual(m.main(['--root',str(root),'--blender','blender','--import-only']),1)
             self.assertTrue(original.is_file())
             self.assertFalse((root/'catalog.json').exists())
 
@@ -43,3 +43,47 @@ class LocalSceneTests(unittest.TestCase):
         self.assertEqual(command[command.index('--frames')+1],'11')
         self.assertNotIn('--hdri',command)
         self.assertIn('--auto-place',command)
+
+    def test_fixed_position_command(self):
+        a=SimpleNamespace(root=Path('/data'),model_id='chinese_cabinet',blender='/bin/blender',frames=11,samples=16)
+        command=m.render_command({'path':'/data/forest.blend','auto_place':False,'position':[1,2,3]},a,Path('/data/output'))
+        self.assertNotIn('--auto-place',command)
+        i=command.index('--subject-position')
+        self.assertEqual(command[i+1:i+4],['1','2','3'])
+
+    def test_current_pool_excludes_disabled_duplicates_and_archives(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);records=[]
+            for name in ('pavilion','local','disabled','scene-sources/old','scenes/blenderkit/raw'):
+                path=root/(name+'.blend');path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(name.encode())
+                records.append({'id':name,'path':str(path),'enabled':name!='disabled'})
+            records.append(dict(records[0],id='duplicate'))
+            result=m.current_scenes({'scenes':records},root)
+            self.assertEqual([s['id'] for s in result],['pavilion','local'])
+
+    def test_reuse_valid_fixed_position_and_invalidate_change(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);scene=root/'scene.blend';scene.write_bytes(b'scene')
+            output=root/'old-preview';output.mkdir()
+            for folder in ('rgb','mask'):
+                (output/folder).mkdir();(output/folder/(folder+'_0001.png')).write_bytes(b'image')
+            from data_generation_server.assets import digest
+            data={'path':str(scene),'blend_sha256':digest(scene,'sha256'),'auto_place':False,'position':[1,2,3]}
+            (output/'SUCCESS.json').write_text(json.dumps({'frames':1}))
+            (output/'local-scene-check.json').write_text(json.dumps({'blend_sha256':data['blend_sha256']}))
+            (output/'render-config.json').write_text(json.dumps({'scene':str(scene),'model_id':'chinese_cabinet','samples':16,'width':1280,'height':720,'auto_place':True}))
+            (output/'render-report.json').write_text(json.dumps({'subject_position':[1,2,3]}))
+            a=SimpleNamespace(frames=11,samples=16,model_id='chinese_cabinet')
+            self.assertTrue(m.complete(output,a,data))
+            dest=root/'unified';dest.mkdir();m.reuse_preview(output,dest)
+            self.assertTrue(m.complete(dest,a,data))
+            data['position']=[4,5,6];self.assertFalse(m.complete(dest,a,data))
+
+    def test_inventory_does_not_restore_archived_source_entries(self):
+        from data_generation_server.dataset import inventory
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);archive=root/'scene-sources/old.blend';archive.parent.mkdir();archive.write_bytes(b'old')
+            upload=root/'scenes/blenderkit/raw.blend';upload.parent.mkdir(parents=True);upload.write_bytes(b'raw')
+            old={'objects':[],'people':[],'backgrounds':[],'scenes':[{'id':'raw','path':str(archive)}]}
+            result=inventory(root,old)
+            self.assertFalse(any(s.get('path') for s in result['scenes']))
