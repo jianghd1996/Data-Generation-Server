@@ -40,3 +40,21 @@ class SelectedRoundTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as t:
             root=Path(t);catalog=self.catalog(root,2);catalog['scenes'].pop()
             with self.assertRaises(ValueError):m.build_plan(catalog,root/'output')
+
+    def test_full_videos_sample_one_scene_each_six_per_subject(self):
+        from data_generation_server.dataset import grid_plan
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t);catalog=self.catalog(root,9)
+            plan=grid_plan(catalog,root/'videos',scene_sampling='per-video')
+            repeat=grid_plan(catalog,root/'videos',scene_sampling='per-video')
+            self.assertEqual(len(plan['jobs']),9*6)
+            self.assertEqual(plan['jobs'],repeat['jobs'])
+            self.assertEqual([j['kind'] for j in plan['jobs'][:6]],['person']*6)
+            for subject in catalog['people']+catalog['objects']:
+                jobs=[j for j in plan['jobs'] if j['subject']['id']==subject['id']]
+                self.assertEqual(len(jobs),6)
+                self.assertEqual(len({(j['shot'],j['orientation']) for j in jobs}),6)
+            for job in plan['jobs']:
+                if job['scene'].get('path'):
+                    self.assertFalse(job['auto_place'])
+                    self.assertIsNone(job['background']['path'])
