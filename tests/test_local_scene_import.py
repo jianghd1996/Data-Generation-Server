@@ -26,7 +26,7 @@ class LocalSceneTests(unittest.TestCase):
             self.assertTrue((Path(scene['source_archive']).parent/'textures/tree.jpg').is_file())
             catalog=json.loads((root/'catalog.json').read_text())
             self.assertEqual(len([x for x in catalog['scenes'] if x.get('path')]),1)
-            self.assertTrue(all(not x['enabled'] for x in catalog['scenes'] if 'preset' in x))
+            self.assertEqual([x['id'] for x in catalog['scenes'] if 'preset' in x and x['enabled']],['courtyard_00'])
 
     def test_failed_import_keeps_original_tree(self):
         with tempfile.TemporaryDirectory() as t:
@@ -87,3 +87,13 @@ class LocalSceneTests(unittest.TestCase):
             old={'objects':[],'people':[],'backgrounds':[],'scenes':[{'id':'raw','path':str(archive)}]}
             result=inventory(root,old)
             self.assertFalse(any(s.get('path') for s in result['scenes']))
+
+    def test_retained_courtyard_is_in_unified_preview(self):
+        with tempfile.TemporaryDirectory() as t:
+            root=Path(t)
+            scene={'id':'courtyard_00','environment':'courtyard','preset':0,'identity':'procedural_courtyard','enabled':True}
+            pool=m.current_scenes({'scenes':[scene]},root)
+            self.assertEqual(len(pool),1)
+            a=SimpleNamespace(root=root,model_id='chinese_cabinet',blender='blender',frames=11,samples=16)
+            cmd=m.render_command(pool[0],a,root/'output')
+            self.assertIn('--environment',cmd);self.assertNotIn('--scene',cmd);self.assertNotIn('--auto-place',cmd)
