@@ -73,13 +73,17 @@ def import_one(source,root,blender):
 
 def render_command(scene,args,output):
     cmd=[sys.executable,'-m','data_generation_server.render','--root',str(args.root),
-        '--scene',scene['path'],'--model-id',args.model_id,
+        '--model-id',args.model_id,
         '--blender',args.blender,'--frames',str(args.frames),'--width','1280','--height','720',
         '--orientation','landscape','--samples',str(args.samples),'--no-video',
         '--no-save-scene','--output',str(output),'--overwrite']
     # No --hdri: standalone external scenes keep their own world lighting.
     cmd.extend(['--subject-position', *map(str,scene.get('position',[0,0,0]))])
-    if scene.get('auto_place',True): cmd.append('--auto-place')
+    if scene.get('path'):
+        cmd.extend(['--scene',scene['path']])
+        if scene.get('auto_place',True): cmd.append('--auto-place')
+    else:
+        cmd.extend(['--environment',scene['environment'],'--scene-preset',str(scene.get('preset',0))])
     return cmd
 
 
@@ -90,9 +94,9 @@ def complete(output,args,scene):
         stamp_path=output/'local-scene-check.json'
         if stamp_path.exists():
             if json.loads(stamp_path.read_text()).get('blend_sha256')!=scene['blend_sha256']:return False
-        elif Path(scene['path']).stat().st_mtime > (output/'render-config.json').stat().st_mtime:
+        elif scene.get('path') and Path(scene['path']).stat().st_mtime > (output/'render-config.json').stat().st_mtime:
             return False
-        if scene.get('auto_place',True):
+        if scene.get('path') and scene.get('auto_place',True):
             if not config.get('auto_place'):return False
             if config.get('placement_index',0)!=0:return False
             if config.get('subject_position',[0,0,0])!=scene.get('position',[0,0,0]):return False
@@ -103,9 +107,10 @@ def complete(output,args,scene):
         frames=success.get('frames',0)
         return (isinstance(frames,int) and frames>0 and config.get('samples')==args.samples
             and config.get('width')==1280 and config.get('height')==720
-            and config.get('hdri') is None
+            and (not scene.get('path') or config.get('hdri') is None)
             and config.get('shot','manual')=='manual'
-            and config.get('scene')==scene['path'] and config.get('model_id')==args.model_id
+            and config.get('scene')==scene.get('path') and config.get('model_id')==args.model_id
+            and (bool(scene.get('path')) or (config.get('environment')==scene.get('environment') and config.get('scene_preset',0)==scene.get('preset',0)))
             and all((output/'rgb'/('rgb_%04d.png'%i)).is_file()
                     and (output/'mask'/('mask_%04d.png'%i)).is_file() for i in range(1,frames+1)))
     except (OSError,ValueError,KeyError,TypeError):return False
@@ -128,7 +133,11 @@ def reuse_preview(source,destination):
 def current_scenes(catalog,root):
     scenes=[];seen_paths=set();seen_identities=set()
     for item in catalog.get('scenes',[]):
-        if not item.get('enabled',True) or not item.get('path'):continue
+        if not item.get('enabled',True):continue
+        if not item.get('path'):
+            if item.get('environment')=='courtyard' and item.get('preset')==0:
+                scenes.append(dict(item,path=None,auto_place=False,output_id=item['id'],blend_sha256='procedural-courtyard-00-v1'))
+            continue
         path=Path(item['path']).resolve()
         if (not path.is_file() or path.is_relative_to(root/'scene-sources')
                 or path.is_relative_to(root/'scenes/blenderkit')):continue
@@ -224,7 +233,8 @@ def main(argv=None):
         if config_path.parent.is_relative_to(output):continue
         try:
             cfg=json.loads(config_path.read_text())
-            if cfg.get('scene'):previous_outputs.setdefault(cfg['scene'],[]).append(config_path.parent)
+            key=cfg.get('scene') or ('courtyard_%02d'%cfg.get('scene_preset',0) if cfg.get('environment')=='courtyard' else None)
+            if key:previous_outputs.setdefault(key,[]).append(config_path.parent)
         except (ValueError,OSError):pass
     jobs=queue.Queue()
     for record in scenes:jobs.put(record)
@@ -238,7 +248,7 @@ def main(argv=None):
             item={'id':scene['id'],'output_id':scene['output_id'],'name':scene.get('name',scene['id']),'gpu':gpu,'output':str(folder),
                   'placement_mode':'auto' if scene.get('auto_place',True) else 'fixed', 'position':scene.get('position',[0,0,0])}
             if not complete(folder,a,scene):
-                for prior in previous_outputs.get(scene['path'],[]):
+                for prior in previous_outputs.get(scene.get('path') or scene['id'],[]):
                     if complete(prior,a,scene):
                         reuse_preview(prior,folder)
                         item['reused_from']=str(prior)
